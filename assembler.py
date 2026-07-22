@@ -70,11 +70,14 @@ B_TYPE = {
     'bgeu': 0x6A, 'jreg': 0x6B, 'callreg': 0x6C,
 }
 
-# V-type: 6 bytes, byte0 = opcode, byte1 = (Vs1<<4)|Vs2, byte2-3 = imm16, byte4-5 = 0
+# V-type: 6 bytes (8 for vfmadd)
+# byte0 = 0x80 | Vd, byte1 = (Vs1<<4)|Vs2, byte2 = funct8, byte3 = aux,
+# byte4-5 = extension (offset for vld/vst, Vs3 for vfmadd)
 V_TYPE = {
-    'vadd': 0x80, 'vsub': 0x81, 'vmul': 0x82, 'vand': 0x83, 'vor': 0x84,
-    'vxor': 0x85, 'vld': 0x86, 'vst': 0x87, 'vshl': 0x88, 'vshr': 0x89,
-    'vshuffle': 0x8A, 'vfmadd': 0x8B,
+    'vadd': 0x00, 'vsub': 0x01, 'vmul': 0x02, 'vand': 0x03, 'vor': 0x04,
+    'vxor': 0x05, 'vld': 0x06, 'vst': 0x07, 'vshl': 0x08, 'vshr': 0x09,
+    'vshuffle': 0x0A, 'vfmadd': 0x0B,
+    'vfadd.s': 0x0C, 'vfsub.s': 0x0D, 'vfmul.s': 0x0E, 'vfdiv.s': 0x0F,
 }
 
 # C-type: 6 bytes, byte0 = opcode, byte1-5 = varies
@@ -136,9 +139,9 @@ def tokenize(source: str) -> List[Token]:
                 tokens.append(Token('mem', '+', line_no))
             elif part == '-':
                 tokens.append(Token('mem', '-', line_no))
-            elif part.startswith('r') or part.startswith('R'):
+            elif re.match(r'^[rR]\d+$', part):
                 tokens.append(Token('reg', part.lower(), line_no))
-            elif part.startswith('v') or part.startswith('V'):
+            elif re.match(r'^[vV]\d+$', part):
                 tokens.append(Token('vreg', part.lower(), line_no))
             elif part.startswith('0x') or part.startswith('-0x') or part.lstrip('-').isdigit():
                 tokens.append(Token('imm', part, line_no))
@@ -556,7 +559,7 @@ class Assembler:
 
     # ---- V-type ----
     def _emit_v(self, mnemonic, ops):
-        opcode = V_TYPE[mnemonic]
+        funct = V_TYPE[mnemonic]
 
         if mnemonic in ('vld', 'vst'):
             # vld Vd, [Rs1 + off16] / vst Vd, [Rs1 + off16]
@@ -564,40 +567,74 @@ class Assembler:
             base, off, _, _ = parse_mem_operand(ops[1])
             vs1 = base
             vs2 = 0
-            elem_width = 3  # 64-bit default
+            self.output.append(0x80 | (vd & 0xF))
+            self.output.append(((vs1 & 0xF) << 4) | (vs2 & 0xF))
+            self.output.append(funct)
+            self.output.append(0)  # aux
+            self.output.extend(pack_i16(off))  # extension = offset
+            self.offset += 6
+            return
         elif mnemonic in ('vshl', 'vshr'):
             vd = parse_vreg(ops[0])
             vs1 = parse_vreg(ops[1])
-            vs2 = parse_imm(ops[2]) & 0x1F
-            elem_width = 0
+            imm = parse_imm(ops[2]) & 0x1F
+            vs2 = imm  # shift amount in vs2 field
+            self.output.append(0x80 | (vd & 0xF))
+            self.output.append(((vs1 & 0xF) << 4) | (vs2 & 0xF))
+            self.output.append(funct)
+            self.output.append(0)  # aux
+            self.output.extend(b'\x00\x00')
+            self.offset += 6
+            return
         elif mnemonic == 'vshuffle':
             vd = parse_vreg(ops[0])
             vs1 = parse_vreg(ops[1])
-            vs2 = parse_imm(ops[2]) & 0xFF
-            elem_width = 0
+            imm = parse_imm(ops[2]) & 0xFF
+            vs2 = 0
+            self.output.append(0x80 | (vd & 0xF))
+            self.output.append(((vs1 & 0xF) << 4) | (vs2 & 0xF))
+            self.output.append(funct)
+            self.output.append(imm)  # aux = shuffle mask
+            self.output.extend(b'\x00\x00')
+            self.offset += 6
+            return
         elif mnemonic == 'vfmadd':
             vd = parse_vreg(ops[0])
             vs1 = parse_vreg(ops[1])
             vs2 = parse_vreg(ops[2])
             vs3 = parse_vreg(ops[3])
-            elem_width = 0
-            self.output.append(opcode)
-            self.output.append(((vs1 & 0xF) << 4) | vs2)
-            self.output.extend(pack_u16(elem_width))
-            self.output.extend(pack_u16(vs3))  # Vs3 in byte6-7
+            self.output.append(0x80 | (vd & 0xF))
+            self.output.append(((vs1 & 0xF) << 4) | (vs2 & 0xF))
+            self.output.append(funct)
+            self.output.append(0)  # aux
+            self.output.extend(pack_u16(vs3 & 0xF))  # extension = Vs3
             self.offset += 8
             return
-        else:
+        elif mnemonic in ('vfadd.s', 'vfsub.s', 'vfmul.s', 'vfdiv.s'):
             vd = parse_vreg(ops[0])
             vs1 = parse_vreg(ops[1])
             vs2 = parse_vreg(ops[2])
-            elem_width = 0
-
-        self.output.append(opcode)
-        self.output.append(((vs1 & 0xF) << 4) | (vs2 & 0xF))
-        self.output.extend(pack_u16(elem_width))
-        self.output.extend(b'\x00\x00')
-        self.offset += 6
+            # aux byte: [reserved 5 bits][rm 2 bits][prec 1 bit]
+            # prec: 0=f32, 1=f64; rm: 0=RNE, 1=RTZ, 2=RDN, 3=RUP
+            aux = 0  # default: f32, RNE
+            self.output.append(0x80 | (vd & 0xF))
+            self.output.append(((vs1 & 0xF) << 4) | (vs2 & 0xF))
+            self.output.append(funct)
+            self.output.append(aux)
+            self.output.extend(b'\x00\x00')
+            self.offset += 6
+            return
+        else:
+            # vadd, vsub, vmul, vand, vor, vxor
+            vd = parse_vreg(ops[0])
+            vs1 = parse_vreg(ops[1])
+            vs2 = parse_vreg(ops[2])
+            self.output.append(0x80 | (vd & 0xF))
+            self.output.append(((vs1 & 0xF) << 4) | (vs2 & 0xF))
+            self.output.append(funct)
+            self.output.append(0)  # aux
+            self.output.extend(b'\x00\x00')
+            self.offset += 6
 
     # ---- C-type ----
     def _emit_c(self, mnemonic, ops):

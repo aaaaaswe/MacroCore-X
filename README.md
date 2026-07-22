@@ -63,6 +63,7 @@ See the full license text in the [`LICENSE`](LICENSE) file or at:
 ## ✅ Assembler
 - Full assembler in Python (`assembler.py`): converts MacroCore-X assembly to binary machine code
 - Supports all instruction types: R-type, I-type, L-type, B-type, V-type, C-type, System
+- Scalar FP support: vfadd.s, vfsub.s, vfmul.s, vfdiv.s (f32/f64, IEEE 754)
 - Supports labels and branch target resolution
 - Generates hex dump of output binary
 
@@ -79,6 +80,7 @@ See the full license text in the [`LICENSE`](LICENSE) file or at:
 ## 📁 Examples
 - `examples/test_alu.asm`: Tests arithmetic, logical, shift, and comparison operations
 - `examples/fibonacci.asm`: Computes first 10 Fibonacci numbers and stores them in memory
+- `examples/test_fp.asm`: Tests scalar floating-point operations (vfadd.s, vfsub.s, vfmul.s, vfdiv.s)
 
 ## 🚀 Quick Start
 ```bash

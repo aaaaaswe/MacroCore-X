@@ -106,9 +106,10 @@ B_MNEMONICS = {
 }
 
 V_MNEMONICS = {
-    0x80: 'vadd', 0x81: 'vsub', 0x82: 'vmul', 0x83: 'vand', 0x84: 'vor',
-    0x85: 'vxor', 0x86: 'vld', 0x87: 'vst', 0x88: 'vshl', 0x89: 'vshr',
-    0x8A: 'vshuffle', 0x8B: 'vfmadd',
+    0x00: 'vadd', 0x01: 'vsub', 0x02: 'vmul', 0x03: 'vand', 0x04: 'vor',
+    0x05: 'vxor', 0x06: 'vld', 0x07: 'vst', 0x08: 'vshl', 0x09: 'vshr',
+    0x0A: 'vshuffle', 0x0B: 'vfmadd',
+    0x0C: 'vfadd.s', 0x0D: 'vfsub.s', 0x0E: 'vfmul.s', 0x0F: 'vfdiv.s',
 }
 
 C_MNEMONICS = {
@@ -125,7 +126,7 @@ SYS2_MNEMONICS = {
 SYS4_MNEMONICS = {0xA4: 'rdmsr', 0xA5: 'wrmsr'}
 
 
-def get_inst_length(opcode: int) -> int:
+def get_inst_length(cpu: CPU, opcode: int, pc: int) -> int:
     """Determine instruction length from opcode byte."""
     if opcode <= 0x12:
         return 2  # R-type
@@ -139,10 +140,13 @@ def get_inst_length(opcode: int) -> int:
         return 6  # L-type 6-byte
     if 0x60 <= opcode <= 0x6C:
         return 4  # B-type
-    if 0x80 <= opcode <= 0x8A:
-        return 6  # V-type 6-byte
-    if opcode == 0x8B:
-        return 8  # vfmadd
+    if (opcode & 0xF0) == 0x80:
+        # V-type: check funct for vfmadd (8 bytes)
+        if len(cpu.mem) > pc + 2:
+            funct = cpu.read_byte(pc + 2)
+            if funct == 0x0B:  # vfmadd
+                return 8
+        return 6
     if 0x90 <= opcode <= 0x97:
         return 6  # C-type
     if opcode in (0xA0, 0xA1, 0xA2, 0xA3, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB):
@@ -155,7 +159,7 @@ def get_inst_length(opcode: int) -> int:
 def disassemble_one(cpu: CPU, pc: int) -> Tuple[str, int]:
     """Disassemble one instruction at PC. Returns (string, length)."""
     opcode = cpu.read_byte(pc)
-    length = get_inst_length(opcode)
+    length = get_inst_length(cpu, opcode, pc)
 
     if opcode <= 0x12:
         # R-type
@@ -249,30 +253,36 @@ def disassemble_one(cpu: CPU, pc: int) -> Tuple[str, int]:
         target = pc + (imm12 << 2)
         return f"{mnem} r{rs1}, r{rs2}, 0x{target:x}", length
 
-    elif 0x80 <= opcode <= 0x8B:
-        # V-type
+    elif (opcode & 0xF0) == 0x80:
+        # V-type (new encoding): byte0=0x80|Vd, byte1=(Vs1<<4)|Vs2, byte2=funct, byte3=aux, byte4-5=ext
         byte1 = cpu.read_byte(pc + 1)
-        vd = byte0 & 0xF
+        vd = opcode & 0xF
         vs1 = (byte1 >> 4) & 0xF
         vs2 = byte1 & 0xF
-        imm16 = cpu.read_u16(pc + 2)
-        mnem = V_MNEMONICS.get(opcode, f'???')
+        funct = cpu.read_byte(pc + 2)
+        aux = cpu.read_byte(pc + 3)
+        ext = cpu.read_u16(pc + 4)
+        mnem = V_MNEMONICS.get(funct, f'v???({funct:02x})')
 
         if mnem in ('vld', 'vst'):
-            return f"{mnem} v{vd}, [r{vs1} + {imm16}]", length
+            off = sign_extend_64(ext, 16)
+            return f"{mnem} v{vd}, [r{vs1} + {off}]", length
         if mnem in ('vshl', 'vshr'):
-            return f"{mnem} v{vd}, v{vs1}, {imm16 & 0x1F}", length
+            return f"{mnem} v{vd}, v{vs1}, {vs2}", length
         if mnem == 'vshuffle':
-            return f"{mnem} v{vd}, v{vs1}, {imm16 & 0xFF}", length
+            return f"{mnem} v{vd}, v{vs1}, {aux}", length
         if mnem == 'vfmadd':
-            vs3 = cpu.read_u16(pc + 6) & 0xF
+            vs3 = ext & 0xF
             return f"{mnem} v{vd}, v{vs1}, v{vs2}, v{vs3}", length
+        if mnem in ('vfadd.s', 'vfsub.s', 'vfmul.s', 'vfdiv.s'):
+            prec = 'f64' if (aux & 1) else 'f32'
+            return f"{mnem} v{vd}, v{vs1}, v{vs2}", length
         return f"{mnem} v{vd}, v{vs1}, v{vs2}", length
 
     elif 0x90 <= opcode <= 0x97:
         # C-type
         byte1 = cpu.read_byte(pc + 1)
-        rd = byte0 & 0xF
+        rd = opcode & 0xF
         rs1 = (byte1 >> 4) & 0xF
         rs2 = byte1 & 0xF
         mnem = C_MNEMONICS.get(opcode, f'???')
@@ -350,13 +360,67 @@ def set_flags_logical(cpu: CPU, result: int):
     cpu.cf = 0
     cpu.of = 0
 
+
+# =============================================================================
+# Scalar FP Helpers
+# =============================================================================
+
+def int_to_f32(val: int) -> float:
+    """Convert 64-bit integer (low 32 bits) to IEEE 754 single-precision float."""
+    return struct.unpack('<f', struct.pack('<I', val & 0xFFFFFFFF))[0]
+
+def f32_to_int(val: float) -> int:
+    """Convert IEEE 754 single-precision float to 64-bit integer (zero-extended)."""
+    return struct.unpack('<I', struct.pack('<f', val))[0]
+
+def int_to_f64(val: int) -> float:
+    """Convert 64-bit integer to IEEE 754 double-precision float."""
+    return struct.unpack('<d', struct.pack('<Q', val))[0]
+
+def f64_to_int(val: float) -> int:
+    """Convert IEEE 754 double-precision float to 64-bit integer."""
+    return struct.unpack('<Q', struct.pack('<d', val))[0]
+
+def fp_execute(cpu: CPU, vd: int, vs1: int, vs2: int, op: str, aux: int):
+    """Execute scalar FP operation on V registers."""
+    is_f64 = (aux & 1) != 0
+    if is_f64:
+        a = int_to_f64(cpu.v[vs1])
+        b = int_to_f64(cpu.v[vs2])
+        if op == 'fadd':
+            result = a + b
+        elif op == 'fsub':
+            result = a - b
+        elif op == 'fmul':
+            result = a * b
+        elif op == 'fdiv':
+            result = a / b if b != 0.0 else float('inf')
+        else:
+            result = 0.0
+        cpu.v[vd] = f64_to_int(result)
+    else:
+        a = int_to_f32(cpu.v[vs1])
+        b = int_to_f32(cpu.v[vs2])
+        if op == 'fadd':
+            result = a + b
+        elif op == 'fsub':
+            result = a - b
+        elif op == 'fmul':
+            result = a * b
+        elif op == 'fdiv':
+            result = a / b if b != 0.0 else float('inf')
+        else:
+            result = 0.0
+        cpu.v[vd] = f32_to_int(result)
+
+
 def execute_one(cpu: CPU, trace: bool = False) -> bool:
     """
     Execute one instruction. Returns True if execution should continue.
     """
     pc = cpu.pc
     opcode = cpu.read_byte(pc)
-    length = get_inst_length(opcode)
+    length = get_inst_length(cpu, opcode, pc)
 
     if trace:
         disasm, _ = disassemble_one(cpu, pc)
@@ -689,40 +753,52 @@ def execute_one(cpu: CPU, trace: bool = False) -> bool:
         return True
 
     # ---- V-type ----
-    if 0x80 <= opcode <= 0x8B:
+    if (opcode & 0xF0) == 0x80:
         byte1 = cpu.read_byte(pc + 1)
         vd = opcode & 0xF
         vs1 = (byte1 >> 4) & 0xF
         vs2 = byte1 & 0xF
-        imm16 = cpu.read_u16(pc + 2)
+        funct = cpu.read_byte(pc + 2)
+        aux = cpu.read_byte(pc + 3)
+        ext = cpu.read_u16(pc + 4)
 
-        if opcode == 0x80:  # vadd
+        if funct == 0x00:  # vadd
             cpu.v[vd] = (cpu.v[vs1] + cpu.v[vs2]) & 0xFFFFFFFFFFFFFFFF
-        elif opcode == 0x81:  # vsub
+        elif funct == 0x01:  # vsub
             cpu.v[vd] = (cpu.v[vs1] - cpu.v[vs2]) & 0xFFFFFFFFFFFFFFFF
-        elif opcode == 0x82:  # vmul
+        elif funct == 0x02:  # vmul
             cpu.v[vd] = (cpu.v[vs1] * cpu.v[vs2]) & 0xFFFFFFFFFFFFFFFF
-        elif opcode == 0x83:  # vand
+        elif funct == 0x03:  # vand
             cpu.v[vd] = cpu.v[vs1] & cpu.v[vs2]
-        elif opcode == 0x84:  # vor
+        elif funct == 0x04:  # vor
             cpu.v[vd] = cpu.v[vs1] | cpu.v[vs2]
-        elif opcode == 0x85:  # vxor
+        elif funct == 0x05:  # vxor
             cpu.v[vd] = cpu.v[vs1] ^ cpu.v[vs2]
-        elif opcode == 0x86:  # vld
-            addr = (cpu.r[vs1] + imm16) & 0xFFFFFFFFFFFFFFFF
+        elif funct == 0x06:  # vld
+            off = sign_extend_64(ext, 16)
+            addr = (cpu.r[vs1] + off) & 0xFFFFFFFFFFFFFFFF
             cpu.v[vd] = cpu.read_mem(addr, 8)
-        elif opcode == 0x87:  # vst
-            addr = (cpu.r[vs1] + imm16) & 0xFFFFFFFFFFFFFFFF
+        elif funct == 0x07:  # vst
+            off = sign_extend_64(ext, 16)
+            addr = (cpu.r[vs1] + off) & 0xFFFFFFFFFFFFFFFF
             cpu.write_mem(addr, 8, cpu.v[vd])
-        elif opcode == 0x88:  # vshl
-            cpu.v[vd] = (cpu.v[vs1] << (imm16 & 0x1F)) & 0xFFFFFFFFFFFFFFFF
-        elif opcode == 0x89:  # vshr
-            cpu.v[vd] = cpu.v[vs1] >> (imm16 & 0x1F)
-        elif opcode == 0x8A:  # vshuffle
+        elif funct == 0x08:  # vshl
+            cpu.v[vd] = (cpu.v[vs1] << (vs2 & 0x1F)) & 0xFFFFFFFFFFFFFFFF
+        elif funct == 0x09:  # vshr
+            cpu.v[vd] = cpu.v[vs1] >> (vs2 & 0x1F)
+        elif funct == 0x0A:  # vshuffle
             cpu.v[vd] = cpu.v[vs1]  # simplified
-        elif opcode == 0x8B:  # vfmadd
-            vs3 = cpu.read_u16(pc + 6) & 0xF
+        elif funct == 0x0B:  # vfmadd
+            vs3 = ext & 0xF
             cpu.v[vd] = (cpu.v[vs1] * cpu.v[vs2] + cpu.v[vs3]) & 0xFFFFFFFFFFFFFFFF
+        elif funct == 0x0C:  # vfadd.s
+            fp_execute(cpu, vd, vs1, vs2, 'fadd', aux)
+        elif funct == 0x0D:  # vfsub.s
+            fp_execute(cpu, vd, vs1, vs2, 'fsub', aux)
+        elif funct == 0x0E:  # vfmul.s
+            fp_execute(cpu, vd, vs1, vs2, 'fmul', aux)
+        elif funct == 0x0F:  # vfdiv.s
+            fp_execute(cpu, vd, vs1, vs2, 'fdiv', aux)
 
         cpu.pc += length
         cpu.r[0] = 0

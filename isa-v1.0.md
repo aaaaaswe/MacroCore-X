@@ -233,39 +233,48 @@ byte2-3: IMM12 low 8 bits + padding
 
 **Format (6-byte)**:
 ```
-byte0:   [OP 4 bits][Vd 4 bits]
+byte0:   [0x8 4 bits][Vd 4 bits]
 byte1:   [Vs1 4 bits][Vs2 4 bits]
-byte2-3: IMM16 (element width / mask)
-byte4-5: Reserved / extension
+byte2:   FUNCT8 (operation code)
+byte3:   AUX (precision / mask / shuffle control)
+byte4-5: EXT (offset for vld/vst, Vs3 for vfmadd)
 ```
 
 **Format (8-byte fused multiply-add)**:
 ```
 byte0-5: same as above
-byte6-7: Vs3 + additional control
+byte4-5: Vs3 (for vfmadd, byte6-7 re-purposed as Vs3)
 ```
 
-Element width is specified by the low 2 bits of IMM16:
+For vector instructions, element width is specified by the low 2 bits of AUX (byte3):
 - `00` = 8-bit
 - `01` = 16-bit
 - `10` = 32-bit
 - `11` = 64-bit
 
-| OP | Mnemonic | Operands | Semantics |
+For scalar FP instructions, AUX (byte3) encodes precision and rounding mode:
+- AUX[0]: precision (0 = f32, 1 = f64)
+- AUX[2:1]: rounding mode (0 = RNE, 1 = RTZ, 2 = RDN, 3 = RUP)
+
+| FUNCT | Mnemonic | Operands | Semantics |
 |----|----------|----------|-----------|
-| 0x80 | `vadd` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] + V[Vs2][i] |
-| 0x81 | `vsub` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] - V[Vs2][i] |
-| 0x82 | `vmul` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] × V[Vs2][i] |
-| 0x83 | `vand` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] & V[Vs2][i] |
-| 0x84 | `vor` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] \| V[Vs2][i] |
-| 0x85 | `vxor` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] ^ V[Vs2][i] |
-| 0x86 | `vld` | Vd, [Rs1 + off16] | V[Vd] ← Mem[Rs1+off, 256] (aligned) |
-| 0x87 | `vst` | Vd, [Rs1 + off16] | Mem[Rs1+off, 256] ← V[Vd] (aligned) |
-| 0x88 | `vshl` | Vd, Vs1, imm5 | V[Vd][i] ← V[Vs1][i] << imm5 (element-wise) |
-| 0x89 | `vshr` | Vd, Vs1, imm5 | V[Vd][i] ← V[Vs1][i] >> imm5 (logical) |
-| 0x8A | `vshuffle` | Vd, Vs1, imm8 | V[Vd][i] ← V[Vs1][ imm8[i] ] (byte shuffle, 8 bytes) |
-| 0x8B | `vfmadd` | Vd, Vs1, Vs2, Vs3 | V[Vd][i] ← V[Vs1][i]×V[Vs2][i]+V[Vs3][i] (8 bytes) |
-| 0x8C-0x8F | *Reserved* | — | — |
+| 0x00 | `vadd` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] + V[Vs2][i] |
+| 0x01 | `vsub` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] - V[Vs2][i] |
+| 0x02 | `vmul` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] × V[Vs2][i] |
+| 0x03 | `vand` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] & V[Vs2][i] |
+| 0x04 | `vor` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] \| V[Vs2][i] |
+| 0x05 | `vxor` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] ^ V[Vs2][i] |
+| 0x06 | `vld` | Vd, [Rs1 + off16] | V[Vd] ← Mem[Rs1+off, 256] (aligned) |
+| 0x07 | `vst` | Vd, [Rs1 + off16] | Mem[Rs1+off, 256] ← V[Vd] (aligned) |
+| 0x08 | `vshl` | Vd, Vs1, imm5 | V[Vd][i] ← V[Vs1][i] << imm5 (element-wise) |
+| 0x09 | `vshr` | Vd, Vs1, imm5 | V[Vd][i] ← V[Vs1][i] >> imm5 (logical) |
+| 0x0A | `vshuffle` | Vd, Vs1, imm8 | V[Vd][i] ← V[Vs1][ imm8[i] ] (byte shuffle, 8 bytes) |
+| 0x0B | `vfmadd` | Vd, Vs1, Vs2, Vs3 | V[Vd][i] ← V[Vs1][i]×V[Vs2][i]+V[Vs3][i] (8 bytes) |
+| 0x0C | `vfadd.s` | Vd, Vs1, Vs2 | V[Vd] ← float(V[Vs1]) + float(V[Vs2]) (scalar IEEE 754) |
+| 0x0D | `vfsub.s` | Vd, Vs1, Vs2 | V[Vd] ← float(V[Vs1]) - float(V[Vs2]) (scalar IEEE 754) |
+| 0x0E | `vfmul.s` | Vd, Vs1, Vs2 | V[Vd] ← float(V[Vs1]) × float(V[Vs2]) (scalar IEEE 754) |
+| 0x0F | `vfdiv.s` | Vd, Vs1, Vs2 | V[Vd] ← float(V[Vs1]) ÷ float(V[Vs2]) (scalar IEEE 754) |
+| 0x10-0xFF | *Reserved* | — | — |
 
 ---
 
