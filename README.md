@@ -59,7 +59,41 @@ See the full license text in the [`LICENSE`](LICENSE) file or at:
 - ✅ Data transfer, arithmetic, logic, control transfer, system, flags, string operations
 - ⏳ Vector/SIMD extension (under design)
 - ⏳ Decoder RTL (planned)
-- ⏳ Assembler & toolchain (planned)
+-## ⏳ Assembler & toolchain (planned)
+## ✅ Assembler
+- Full assembler in Python (`assembler.py`): converts MacroCore-X assembly to binary machine code
+- Supports all instruction types: R-type, I-type, L-type, B-type, V-type, C-type, System
+- Supports labels and branch target resolution
+- Generates hex dump of output binary
+
+## ✅ Simulator / Emulator
+- Behavioral simulator in Python (`simulator.py`): executes MacroCore-X binary programs
+- Full register file (R0-R31) with R0 hardwired to zero
+- Memory model with configurable size
+- Flag register (CF, ZF, SF, OF)
+- System call support (exit, write, print integer)
+- Disassembly trace mode (`-d` flag)
+- Max step limit (`-s N` flag)
+- Standalone disassembler mode (`--dis` flag)
+
+## 📁 Examples
+- `examples/test_alu.asm`: Tests arithmetic, logical, shift, and comparison operations
+- `examples/fibonacci.asm`: Computes first 10 Fibonacci numbers and stores them in memory
+
+## 🚀 Quick Start
+```bash
+# Assemble
+python3 assembler.py examples/fibonacci.asm -o fibonacci.bin
+
+# Run with trace
+python3 simulator.py fibonacci.bin -d
+
+# Run with step limit
+python3 simulator.py fibonacci.bin -s 100
+
+# Disassemble only
+python3 simulator.py fibonacci.bin --dis
+```
 
 ---
 
