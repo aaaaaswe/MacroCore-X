@@ -10,6 +10,25 @@
 
 ## 第一章 整体架构
 
+### 1.0 模块化架构
+
+MacroCore-X v2.0 采用**模块化分层**设计：
+
+**核心层（MacroCore-X，必选）** — 任何实现都必须包含：
+- **R型**：标量整数运算（add, sub, mul, div, and, or, xor, shl, shr 等）
+- **I型**：立即数运算（addi, subi, muli, movi, mov 等）
+- **L型**：加载/存储（ld, st, ldw, stw, ldb, stb 等）
+- **B型**：分支与跳转（beq, bne, jmp, call, ret, jreg 等）
+- **C型**：复合操作（addm, subm, xchg, push, pop, enter, leave 等）
+- **系统型**：系统控制与调试（syscall, int, cpuid, hlt, cli, sti, ecall 等）
+
+**扩展层（可选）** — 按需裁剪：
+- **F型（标量浮点扩展）**：fadd, fsub, fmul, fdiv, fcmp, fsqrt, fcvt, fmin, fmax, fneg, fabs
+- **V型（向量扩展）**：vadd, vsub, vmul, vld, vst, vshuffle, vfmadd 等
+- **矩阵加速扩展（预留）**：mmul, macc 等
+
+> 层级关系：MacroCore-X 核心层 = 系统控制 + 标量整数 + 内存 + 分支 + 复合操作 + 调试，必选；扩展层 = 标量浮点 / 向量 / 矩阵，可选。
+
 ### 1.1 执行状态
 
 | 组件 | 数量 | 宽度 | 说明 |
@@ -53,11 +72,11 @@ V0–V31，256位宽，可存放：
 | `byte0[7:6]` | 指令长度 | 类别区间 |
 |--------------|----------|----------|
 | `00` | 2字节 | R型（操作码0x00–0x1F） |
-| `01` | 4字节 | I/L/B型（操作码0x20–0x7F） |
-| `10` | 6字节 | V/C扩展型（操作码0x80–0xBF） |
+| `01` | 4/6字节 | I/L/B型（0x20–0x6F, 4字节）；F型（0x70–0x7F, 6字节） |
+| `10` | 6/8字节 | V/C扩展型（操作码0x80–0xBF） |
 | `11` | 8字节 | 长指令（操作码0xC0–0xFF） |
 
-**解码器必须在第一周期仅凭首字节高2位确定长度，无需解析后续字节。**
+> 注：F型（0x70–0x7F）虽然首字节高2位为`01`，但实际固定为6字节。解码器需根据具体操作码区间确定精确长度，而非仅依赖高2位。
 
 ### 2.2 指令通用结构
 
@@ -80,8 +99,9 @@ V0–V31，256位宽，可存放：
 | 0x00–0x1F | **R型** | 2字节 | 寄存器-寄存器运算 |
 | 0x20–0x3F | **I型** | 4字节 | 立即数运算/加载 |
 | 0x40–0x5F | **L型** | 4/6字节 | 加载/存储 |
-| 0x60–0x7F | **B型** | 4字节 | 分支/跳转 |
-| 0x80–0x8F | **V型** | 6/8字节 | 向量操作 |
+| 0x60–0x6F | **B型** | 4字节 | 分支/跳转 |
+| 0x70–0x7F | **F型** | 6字节 | 标量浮点扩展（可选） |
+| 0x80–0x8F | **V型** | 6/8字节 | 向量扩展（可选） |
 | 0x90–0x9F | **C型** | 6/8字节 | 复合存储器操作 |
 | 0xA0–0xBF | **系统型** | 2/4字节 | 特权/管理 |
 | 0xC0–0xFF | **保留** | 各长度 | 未来扩展 |
@@ -226,53 +246,92 @@ V0–V31，256位宽，可存放：
 | 0x6A | `bgeu` | Rs1, Rs2, target12 | if (R[Rs1] ≥ R[Rs2]) PC ← PC + sext(imm12)<<2（无符号） |
 | 0x6B | `jreg` | Rs1 | PC ← R[Rs1] |
 | 0x6C | `callreg` | Rs1 | R31 ← PC + 4; PC ← R[Rs1] |
-| 0x6D-0x7F | *保留* | — | — |
+| 0x6D-0x6F | *保留* | — | — |
 
 > 注意：`call`和`callreg`写入R31时，保存的返回地址是**当前PC + 4**（即`call`指令本身4字节长度），因为所有B型指令都是4字节。`ret`不检查R[31]有效性，由软件保证。
 
 ---
 
-### 3.5 V型指令（向量，6/8字节，OP 0x80–0x8F）
+### 3.5 F型指令（标量浮点扩展，可选，6字节，OP 0x70–0x7F）
 
 **格式（6字节）**：
 ```
-字节0:   [OP 4位][Vd 4位]
+字节0:   [0x7 4位][Fd 4位]
+字节1:   [Fs1 4位][Fs2 4位]
+字节2:   FUNCT8（操作码）
+字节3:   AUX  [rm 3位][prec 2位][rsv 3位]
+字节4-5: 保留
+```
+
+- **Fd**：目标 V 寄存器（标量浮点结果）
+- **Fs1, Fs2**：源 V 寄存器（标量浮点操作数）
+- **FUNCT8**：操作码
+- **AUX**：精度和舍入模式
+  - `prec`（位[2:1]）：0 = f32，1 = f64
+  - `rm`（位[6:3]）：舍入模式（0 = RNE，1 = RTZ，2 = RDN，3 = RUP）
+
+| FUNCT | 助记符 | 操作数 | 语义 |
+|----|--------|--------|------|
+| 0x00 | `fadd` | Fd, Fs1, Fs2 | V[Fd] ← float(V[Fs1]) + float(V[Fs2]) |
+| 0x01 | `fsub` | Fd, Fs1, Fs2 | V[Fd] ← float(V[Fs1]) - float(V[Fs2]) |
+| 0x02 | `fmul` | Fd, Fs1, Fs2 | V[Fd] ← float(V[Fs1]) × float(V[Fs2]) |
+| 0x03 | `fdiv` | Fd, Fs1, Fs2 | V[Fd] ← float(V[Fs1]) ÷ float(V[Fs2]) |
+| 0x04 | `fsqrt` | Fd, Fs1 | V[Fd] ← sqrt(float(V[Fs1])) |
+| 0x05 | `fcmp` | Fs1, Fs2 | ZF ← (V[Fs1]==V[Fs2]); CF ← (V[Fs1]<V[Fs2]) |
+| 0x06 | `fcvt.w.s` | Fd, Fs1 | V[Fd] ← int(float(V[Fs1]))（向零截断） |
+| 0x07 | `fcvt.s.w` | Fd, Fs1 | V[Fd] ← float(int(V[Fs1])) |
+| 0x08 | `fmin` | Fd, Fs1, Fs2 | V[Fd] ← min(float(V[Fs1]), float(V[Fs2])) |
+| 0x09 | `fmax` | Fd, Fs1, Fs2 | V[Fd] ← max(float(V[Fs1]), float(V[Fs2])) |
+| 0x0A | `fneg` | Fd, Fs1 | V[Fd] ← -float(V[Fs1]) |
+| 0x0B | `fabs` | Fd, Fs1 | V[Fd] ← abs(float(V[Fs1])) |
+| 0x0C-0xFF | *保留* | — | — |
+
+> F型复用 V 寄存器文件（与向量扩展共用）。标量浮点操作将 V 寄存器的低32位（f32）或完整64位（f64）解释为 IEEE 754 浮点值。
+
+---
+
+### 3.6 V型指令（向量扩展，可选，6/8字节，OP 0x80–0x8F）
+
+**格式（6字节）**：
+```
+字节0:   [0x8 4位][Vd 4位]
 字节1:   [Vs1 4位][Vs2 4位]
-字节2-3: IMM16（元素宽度/掩码）
-字节4-5: 保留/扩展
+字节2:   FUNCT8（操作码）
+字节3:   AUX（元素宽度 / 掩码 / 混洗控制）
+字节4-5: EXT（vld/vst的偏移量，vfmadd的Vs3）
 ```
 
 **格式（8字节融合乘加）**：
 ```
 字节0-5: 同上
-字节6-7: Vs3 + 附加控制
+字节4-5: Vs3（vfmadd的第三个源寄存器）
 ```
 
-所有向量指令元素宽度由IMM16的低2位指定：
+所有向量指令元素宽度由AUX字节的低2位指定：
 - `00` = 8位
 - `01` = 16位
 - `10` = 32位
 - `11` = 64位
 
-| OP | 助记符 | 操作数 | 语义 |
+| FUNCT | 助记符 | 操作数 | 语义 |
 |----|--------|--------|------|
-| 0x80 | `vadd` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] + V[Vs2][i] |
-| 0x81 | `vsub` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] - V[Vs2][i] |
-| 0x82 | `vmul` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] × V[Vs2][i] |
-| 0x83 | `vand` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] & V[Vs2][i] |
-| 0x84 | `vor` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] \| V[Vs2][i] |
-| 0x85 | `vxor` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] ^ V[Vs2][i] |
-| 0x86 | `vld` | Vd, [Rs1 + off16] | V[Vd] ← Mem[Rs1+off, 256]（对齐） |
-| 0x87 | `vst` | Vd, [Rs1 + off16] | Mem[Rs1+off, 256] ← V[Vd]（对齐） |
-| 0x88 | `vshl` | Vd, Vs1, imm5 | V[Vd][i] ← V[Vs1][i] << imm5（逐元素） |
-| 0x89 | `vshr` | Vd, Vs1, imm5 | V[Vd][i] ← V[Vs1][i] >> imm5（逻辑） |
-| 0x8A | `vshuffle` | Vd, Vs1, imm8 | V[Vd][i] ← V[Vs1][ imm8[i] ]（按字节打乱，8字节） |
-| 0x8B | `vfmadd` | Vd, Vs1, Vs2, Vs3 | V[Vd][i] ← V[Vs1][i]×V[Vs2][i]+V[Vs3][i]（8字节） |
-| 0x8C-0x8F | *保留* | — | — |
+| 0x00 | `vadd` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] + V[Vs2][i] |
+| 0x01 | `vsub` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] - V[Vs2][i] |
+| 0x02 | `vmul` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] × V[Vs2][i] |
+| 0x03 | `vand` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] & V[Vs2][i] |
+| 0x04 | `vor` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] \| V[Vs2][i] |
+| 0x05 | `vxor` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] ^ V[Vs2][i] |
+| 0x06 | `vld` | Vd, [Rs1 + off16] | V[Vd] ← Mem[Rs1+off, 256]（对齐） |
+| 0x07 | `vst` | Vd, [Rs1 + off16] | Mem[Rs1+off, 256] ← V[Vd]（对齐） |
+| 0x08 | `vshl` | Vd, Vs1, imm5 | V[Vd][i] ← V[Vs1][i] << imm5（逐元素） |
+| 0x09 | `vshr` | Vd, Vs1, imm5 | V[Vd][i] ← V[Vs1][i] >> imm5（逻辑） |
+| 0x0A | `vshuffle` | Vd, Vs1, imm8 | V[Vd][i] ← V[Vs1][ imm8[i] ]（按字节打乱，8字节） |
+| 0x0B | `vfmadd` | Vd, Vs1, Vs2, Vs3 | V[Vd][i] ← V[Vs1][i]×V[Vs2][i]+V[Vs3][i]（8字节） |
+| 0x0C-0xFF | *保留* | — | — |
 
 ---
 
-### 3.6 C型指令（复合CISC，6/8字节，OP 0x90–0x9F）
+### 3.7 C型指令（复合CISC，6/8字节，OP 0x90–0x9F）
 
 所有C型指令在微架构层面分解为多个µop，但在ISA层面保证**原子性**（除特别注明）。
 
@@ -292,7 +351,7 @@ V0–V31，256位宽，可存放：
 
 ---
 
-### 3.7 系统指令（2/4字节，OP 0xA0–0xBF）
+### 3.8 系统指令（2/4字节，OP 0xA0–0xBF）
 
 | OP | 助记符 | 操作数 | 语义 | 长度 |
 |----|--------|--------|------|------|
@@ -375,7 +434,9 @@ addi r3, r1, 0x100  # I型，r3 = r1 + 256
 ld r4, [r2 + 0x8]   # 加载64位
 st r5, [r3 - 0x4]   # 存储64位
 call 0x10000        # 调用函数
-vadd v1, v2, v3     # 向量加法
+fadd v2, v0, v1     # F型标量浮点加法
+fcmp v0, v1         # F型浮点比较
+vadd v1, v2, v3     # V型向量加法
 push r6             # 压栈
 syscall 0x1         # 系统调用
 ```
@@ -434,10 +495,5 @@ syscall 0x1         # 系统调用
 | 2/4/6/8字节变长 | 解码器首周期通过高2位定长，兼顾密度与速度 |
 | R0硬连线0 | 简化编译器（常见零值）和通用代码（`xor`指令） |
 | R31硬件返回地址 | 去掉`jalr`的额外指令，`call`/`ret`更高效 |
-| 无浮点标量指令 | 统一用向量指令处理浮点（V型指令可支持FP） |
+| 无浮点标量指令 | F型扩展提供独立的标量浮点指令（fadd/fsub/fmul/fdiv等），与向量扩展（V型）分离，各为可选模块 |
 | 弱内存模型 | 适用于多核，保留`fence`扩展位置 |
-
-
-4. **QEMU模拟器的target描述框架**。
-
-你要哪个方向继续？

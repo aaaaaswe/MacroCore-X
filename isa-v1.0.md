@@ -223,53 +223,92 @@ byte2-3: IMM12 low 8 bits + padding
 | 0x6A | `bgeu` | Rs1, Rs2, target12 | if (R[Rs1] ≥ R[Rs2]) PC ← PC + sext(imm12)<<2 (unsigned) |
 | 0x6B | `jreg` | Rs1 | PC ← R[Rs1] |
 | 0x6C | `callreg` | Rs1 | R31 ← PC + 4; PC ← R[Rs1] |
-| 0x6D-0x7F | *Reserved* | — | — |
+| 0x6D-0x6F | *Reserved* | — | — |
 
 > `call` and `callreg` store `PC + 4` in R31 because all B-type instructions are 4 bytes. `ret` does **not** validate R[31]—software must ensure it is valid.
 
 ---
 
-### 3.5 V-type Instructions (Vector, 6/8 bytes, OP 0x80–0x8F)
+### 3.5 F-type Instructions (Scalar FP Extension, Optional, 6 bytes, OP 0x70–0x7F)
 
 **Format (6-byte)**:
 ```
-byte0:   [OP 4 bits][Vd 4 bits]
+byte0:   [0x7 4 bits][Fd 4 bits]
+byte1:   [Fs1 4 bits][Fs2 4 bits]
+byte2:   FUNCT8 (operation code)
+byte3:   AUX  [rm 3 bits][prec 2 bits][rsv 3 bits]
+byte4-5: Reserved
+```
+
+- **Fd**: destination V register (scalar float result)
+- **Fs1, Fs2**: source V registers (scalar float operands)
+- **FUNCT8**: operation code
+- **AUX**: precision and rounding mode
+  - `prec` (bits [2:1]): 0 = f32, 1 = f64
+  - `rm` (bits [6:3]): rounding mode (0 = RNE, 1 = RTZ, 2 = RDN, 3 = RUP)
+
+| FUNCT | Mnemonic | Operands | Semantics |
+|----|----------|----------|-----------|
+| 0x00 | `fadd` | Fd, Fs1, Fs2 | V[Fd] ← float(V[Fs1]) + float(V[Fs2]) |
+| 0x01 | `fsub` | Fd, Fs1, Fs2 | V[Fd] ← float(V[Fs1]) - float(V[Fs2]) |
+| 0x02 | `fmul` | Fd, Fs1, Fs2 | V[Fd] ← float(V[Fs1]) × float(V[Fs2]) |
+| 0x03 | `fdiv` | Fd, Fs1, Fs2 | V[Fd] ← float(V[Fs1]) ÷ float(V[Fs2]) |
+| 0x04 | `fsqrt` | Fd, Fs1 | V[Fd] ← sqrt(float(V[Fs1])) |
+| 0x05 | `fcmp` | Fs1, Fs2 | ZF ← (V[Fs1]==V[Fs2]); CF ← (V[Fs1]<V[Fs2]) |
+| 0x06 | `fcvt.w.s` | Fd, Fs1 | V[Fd] ← int(float(V[Fs1])) (truncate) |
+| 0x07 | `fcvt.s.w` | Fd, Fs1 | V[Fd] ← float(int(V[Fs1])) |
+| 0x08 | `fmin` | Fd, Fs1, Fs2 | V[Fd] ← min(float(V[Fs1]), float(V[Fs2])) |
+| 0x09 | `fmax` | Fd, Fs1, Fs2 | V[Fd] ← max(float(V[Fs1]), float(V[Fs2])) |
+| 0x0A | `fneg` | Fd, Fs1 | V[Fd] ← -float(V[Fs1]) |
+| 0x0B | `fabs` | Fd, Fs1 | V[Fd] ← abs(float(V[Fs1])) |
+| 0x0C-0xFF | *Reserved* | — | — |
+
+> F-type uses the same V register file as the vector extension. Scalar FP operations interpret the low 32 bits (f32) or full 64 bits (f64) of the V register as IEEE 754 floating-point values.
+
+---
+
+### 3.6 V-type Instructions (Vector Extension, Optional, 6/8 bytes, OP 0x80–0x8F)
+
+**Format (6-byte)**:
+```
+byte0:   [0x8 4 bits][Vd 4 bits]
 byte1:   [Vs1 4 bits][Vs2 4 bits]
-byte2-3: IMM16 (element width / mask)
-byte4-5: Reserved / extension
+byte2:   FUNCT8 (operation code)
+byte3:   AUX (precision / mask / shuffle control)
+byte4-5: EXT (offset for vld/vst, Vs3 for vfmadd)
 ```
 
 **Format (8-byte fused multiply-add)**:
 ```
 byte0-5: same as above
-byte6-7: Vs3 + additional control
+byte4-5: Vs3 (for vfmadd, byte6-7 re-purposed as Vs3)
 ```
 
-Element width is specified by the low 2 bits of IMM16:
+For vector instructions, element width is specified by the low 2 bits of AUX (byte3):
 - `00` = 8-bit
 - `01` = 16-bit
 - `10` = 32-bit
 - `11` = 64-bit
 
-| OP | Mnemonic | Operands | Semantics |
+| FUNCT | Mnemonic | Operands | Semantics |
 |----|----------|----------|-----------|
-| 0x80 | `vadd` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] + V[Vs2][i] |
-| 0x81 | `vsub` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] - V[Vs2][i] |
-| 0x82 | `vmul` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] × V[Vs2][i] |
-| 0x83 | `vand` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] & V[Vs2][i] |
-| 0x84 | `vor` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] \| V[Vs2][i] |
-| 0x85 | `vxor` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] ^ V[Vs2][i] |
-| 0x86 | `vld` | Vd, [Rs1 + off16] | V[Vd] ← Mem[Rs1+off, 256] (aligned) |
-| 0x87 | `vst` | Vd, [Rs1 + off16] | Mem[Rs1+off, 256] ← V[Vd] (aligned) |
-| 0x88 | `vshl` | Vd, Vs1, imm5 | V[Vd][i] ← V[Vs1][i] << imm5 (element-wise) |
-| 0x89 | `vshr` | Vd, Vs1, imm5 | V[Vd][i] ← V[Vs1][i] >> imm5 (logical) |
-| 0x8A | `vshuffle` | Vd, Vs1, imm8 | V[Vd][i] ← V[Vs1][ imm8[i] ] (byte shuffle, 8 bytes) |
-| 0x8B | `vfmadd` | Vd, Vs1, Vs2, Vs3 | V[Vd][i] ← V[Vs1][i]×V[Vs2][i]+V[Vs3][i] (8 bytes) |
-| 0x8C-0x8F | *Reserved* | — | — |
+| 0x00 | `vadd` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] + V[Vs2][i] |
+| 0x01 | `vsub` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] - V[Vs2][i] |
+| 0x02 | `vmul` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] × V[Vs2][i] |
+| 0x03 | `vand` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] & V[Vs2][i] |
+| 0x04 | `vor` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] \| V[Vs2][i] |
+| 0x05 | `vxor` | Vd, Vs1, Vs2 | V[Vd][i] ← V[Vs1][i] ^ V[Vs2][i] |
+| 0x06 | `vld` | Vd, [Rs1 + off16] | V[Vd] ← Mem[Rs1+off, 256] (aligned) |
+| 0x07 | `vst` | Vd, [Rs1 + off16] | Mem[Rs1+off, 256] ← V[Vd] (aligned) |
+| 0x08 | `vshl` | Vd, Vs1, imm5 | V[Vd][i] ← V[Vs1][i] << imm5 (element-wise) |
+| 0x09 | `vshr` | Vd, Vs1, imm5 | V[Vd][i] ← V[Vs1][i] >> imm5 (logical) |
+| 0x0A | `vshuffle` | Vd, Vs1, imm8 | V[Vd][i] ← V[Vs1][ imm8[i] ] (byte shuffle, 8 bytes) |
+| 0x0B | `vfmadd` | Vd, Vs1, Vs2, Vs3 | V[Vd][i] ← V[Vs1][i]×V[Vs2][i]+V[Vs3][i] (8 bytes) |
+| 0x0C-0xFF | *Reserved* | — | — |
 
 ---
 
-### 3.6 C-type Instructions (Composite CISC, 6/8 bytes, OP 0x90–0x9F)
+### 3.7 C-type Instructions (Composite CISC, 6/8 bytes, OP 0x90–0x9F)
 
 All C-type instructions are decomposed into multiple µops at the microarchitecture level, but are **atomic** at the ISA level (unless explicitly noted).
 
@@ -289,7 +328,7 @@ All C-type instructions are decomposed into multiple µops at the microarchitect
 
 ---
 
-### 3.7 System Instructions (2/4 bytes, OP 0xA0–0xBF)
+### 3.8 System Instructions (2/4 bytes, OP 0xA0–0xBF)
 
 | OP | Mnemonic | Operands | Semantics | Length |
 |----|----------|----------|-----------|--------|
