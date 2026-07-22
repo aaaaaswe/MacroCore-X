@@ -77,7 +77,15 @@ V_TYPE = {
     'vadd': 0x00, 'vsub': 0x01, 'vmul': 0x02, 'vand': 0x03, 'vor': 0x04,
     'vxor': 0x05, 'vld': 0x06, 'vst': 0x07, 'vshl': 0x08, 'vshr': 0x09,
     'vshuffle': 0x0A, 'vfmadd': 0x0B,
-    'vfadd.s': 0x0C, 'vfsub.s': 0x0D, 'vfmul.s': 0x0E, 'vfdiv.s': 0x0F,
+}
+
+# F-type: 6 bytes, scalar FP extension (optional)
+# byte0 = 0x70 | Fd, byte1 = (Fs1<<4)|Fs2, byte2 = funct8, byte3 = aux,
+# byte4-5 = reserved
+F_TYPE = {
+    'fadd': 0x00, 'fsub': 0x01, 'fmul': 0x02, 'fdiv': 0x03,
+    'fsqrt': 0x04, 'fcmp': 0x05, 'fcvt.w.s': 0x06, 'fcvt.s.w': 0x07,
+    'fmin': 0x08, 'fmax': 0x09, 'fneg': 0x0A, 'fabs': 0x0B,
 }
 
 # C-type: 6 bytes, byte0 = opcode, byte1-5 = varies
@@ -363,6 +371,8 @@ class Assembler:
             self._emit_b(mnemonic, ops, inst)
         elif mnemonic in V_TYPE:
             self._emit_v(mnemonic, ops)
+        elif mnemonic in F_TYPE:
+            self._emit_f(mnemonic, ops)
         elif mnemonic in C_TYPE:
             self._emit_c(mnemonic, ops)
         elif mnemonic in SYS_TYPE_2:
@@ -610,20 +620,6 @@ class Assembler:
             self.output.extend(pack_u16(vs3 & 0xF))  # extension = Vs3
             self.offset += 8
             return
-        elif mnemonic in ('vfadd.s', 'vfsub.s', 'vfmul.s', 'vfdiv.s'):
-            vd = parse_vreg(ops[0])
-            vs1 = parse_vreg(ops[1])
-            vs2 = parse_vreg(ops[2])
-            # aux byte: [reserved 5 bits][rm 2 bits][prec 1 bit]
-            # prec: 0=f32, 1=f64; rm: 0=RNE, 1=RTZ, 2=RDN, 3=RUP
-            aux = 0  # default: f32, RNE
-            self.output.append(0x80 | (vd & 0xF))
-            self.output.append(((vs1 & 0xF) << 4) | (vs2 & 0xF))
-            self.output.append(funct)
-            self.output.append(aux)
-            self.output.extend(b'\x00\x00')
-            self.offset += 6
-            return
         else:
             # vadd, vsub, vmul, vand, vor, vxor
             vd = parse_vreg(ops[0])
@@ -635,6 +631,38 @@ class Assembler:
             self.output.append(0)  # aux
             self.output.extend(b'\x00\x00')
             self.offset += 6
+
+    # ---- F-type (Scalar FP) ----
+    def _emit_f(self, mnemonic, ops):
+        """Emit F-type scalar FP instruction (6 bytes).
+        byte0 = 0x70 | Fd, byte1 = (Fs1<<4)|Fs2, byte2 = funct, byte3 = aux, byte4-5 = reserved
+        """
+        funct = F_TYPE[mnemonic]
+
+        if mnemonic == 'fcmp':
+            # fcmp Fs1, Fs2 — no destination, sets flags
+            fd = 0
+            fs1 = parse_vreg(ops[0])
+            fs2 = parse_vreg(ops[1])
+        elif mnemonic in ('fsqrt', 'fneg', 'fabs', 'fcvt.w.s', 'fcvt.s.w'):
+            fd = parse_vreg(ops[0])
+            fs1 = parse_vreg(ops[1])
+            fs2 = 0
+        else:
+            fd = parse_vreg(ops[0])
+            fs1 = parse_vreg(ops[1])
+            fs2 = parse_vreg(ops[2])
+
+        # aux byte: [rm 3 bits][prec 2 bits][rsv 3 bits]
+        # prec: 0=f32, 1=f64; rm: 0=RNE, 1=RTZ, 2=RDN, 3=RUP
+        aux = 0  # default: f32, RNE
+
+        self.output.append(0x70 | (fd & 0xF))
+        self.output.append(((fs1 & 0xF) << 4) | (fs2 & 0xF))
+        self.output.append(funct)
+        self.output.append(aux)
+        self.output.extend(b'\x00\x00')
+        self.offset += 6
 
     # ---- C-type ----
     def _emit_c(self, mnemonic, ops):

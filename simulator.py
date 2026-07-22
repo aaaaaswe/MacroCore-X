@@ -109,7 +109,12 @@ V_MNEMONICS = {
     0x00: 'vadd', 0x01: 'vsub', 0x02: 'vmul', 0x03: 'vand', 0x04: 'vor',
     0x05: 'vxor', 0x06: 'vld', 0x07: 'vst', 0x08: 'vshl', 0x09: 'vshr',
     0x0A: 'vshuffle', 0x0B: 'vfmadd',
-    0x0C: 'vfadd.s', 0x0D: 'vfsub.s', 0x0E: 'vfmul.s', 0x0F: 'vfdiv.s',
+}
+
+F_MNEMONICS = {
+    0x00: 'fadd', 0x01: 'fsub', 0x02: 'fmul', 0x03: 'fdiv',
+    0x04: 'fsqrt', 0x05: 'fcmp', 0x06: 'fcvt.w.s', 0x07: 'fcvt.s.w',
+    0x08: 'fmin', 0x09: 'fmax', 0x0A: 'fneg', 0x0B: 'fabs',
 }
 
 C_MNEMONICS = {
@@ -147,6 +152,8 @@ def get_inst_length(cpu: CPU, opcode: int, pc: int) -> int:
             if funct == 0x0B:  # vfmadd
                 return 8
         return 6
+    if (opcode & 0xF0) == 0x70:
+        return 6  # F-type scalar FP
     if 0x90 <= opcode <= 0x97:
         return 6  # C-type
     if opcode in (0xA0, 0xA1, 0xA2, 0xA3, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB):
@@ -274,10 +281,24 @@ def disassemble_one(cpu: CPU, pc: int) -> Tuple[str, int]:
         if mnem == 'vfmadd':
             vs3 = ext & 0xF
             return f"{mnem} v{vd}, v{vs1}, v{vs2}, v{vs3}", length
-        if mnem in ('vfadd.s', 'vfsub.s', 'vfmul.s', 'vfdiv.s'):
-            prec = 'f64' if (aux & 1) else 'f32'
-            return f"{mnem} v{vd}, v{vs1}, v{vs2}", length
         return f"{mnem} v{vd}, v{vs1}, v{vs2}", length
+
+    elif (opcode & 0xF0) == 0x70:
+        # F-type scalar FP
+        byte1 = cpu.read_byte(pc + 1)
+        fd = opcode & 0xF
+        fs1 = (byte1 >> 4) & 0xF
+        fs2 = byte1 & 0xF
+        funct = cpu.read_byte(pc + 2)
+        aux = cpu.read_byte(pc + 3)
+        mnem = F_MNEMONICS.get(funct, f'f???({funct:02x})')
+        prec = 'f64' if (aux & 0x06) else 'f32'  # prec in bits [2:1]
+
+        if mnem in ('fsqrt', 'fneg', 'fabs', 'fcvt.w.s', 'fcvt.s.w'):
+            return f"{mnem} v{fd}, v{fs1}", length
+        if mnem == 'fcmp':
+            return f"{mnem} v{fs1}, v{fs2}", length
+        return f"{mnem} v{fd}, v{fs1}, v{fs2}", length
 
     elif 0x90 <= opcode <= 0x97:
         # C-type
@@ -381,37 +402,94 @@ def f64_to_int(val: float) -> int:
     """Convert IEEE 754 double-precision float to 64-bit integer."""
     return struct.unpack('<Q', struct.pack('<d', val))[0]
 
-def fp_execute(cpu: CPU, vd: int, vs1: int, vs2: int, op: str, aux: int):
-    """Execute scalar FP operation on V registers."""
-    is_f64 = (aux & 1) != 0
+def fp_execute_f(cpu: CPU, fd: int, fs1: int, fs2: int, funct: int, aux: int):
+    """Execute F-type scalar FP operation on V registers.
+    aux byte: [rm 3 bits][prec 2 bits][rsv 3 bits]
+    prec: bits [2:1] — 0=f32, 1=f64
+    """
+    is_f64 = ((aux >> 1) & 0x3) == 1
     if is_f64:
-        a = int_to_f64(cpu.v[vs1])
-        b = int_to_f64(cpu.v[vs2])
-        if op == 'fadd':
+        a = int_to_f64(cpu.v[fs1])
+        b = int_to_f64(cpu.v[fs2]) if funct not in (0x04, 0x06, 0x07) else 0.0
+        if funct == 0x00:  # fadd
             result = a + b
-        elif op == 'fsub':
+        elif funct == 0x01:  # fsub
             result = a - b
-        elif op == 'fmul':
+        elif funct == 0x02:  # fmul
             result = a * b
-        elif op == 'fdiv':
+        elif funct == 0x03:  # fdiv
             result = a / b if b != 0.0 else float('inf')
+        elif funct == 0x04:  # fsqrt
+            result = a ** 0.5 if a >= 0.0 else float('nan')
+        elif funct == 0x06:  # fcvt.w.s (float→int)
+            result = float(int(a))  # truncate toward zero
+        elif funct == 0x07:  # fcvt.s.w (int→float)
+            result = float(a)
+        elif funct == 0x08:  # fmin
+            result = a if a < b else b
+        elif funct == 0x09:  # fmax
+            result = a if a > b else b
         else:
             result = 0.0
-        cpu.v[vd] = f64_to_int(result)
+        cpu.v[fd] = f64_to_int(result)
     else:
-        a = int_to_f32(cpu.v[vs1])
-        b = int_to_f32(cpu.v[vs2])
-        if op == 'fadd':
+        a = int_to_f32(cpu.v[fs1])
+        b = int_to_f32(cpu.v[fs2]) if funct not in (0x04, 0x06, 0x07) else 0.0
+        if funct == 0x00:  # fadd
             result = a + b
-        elif op == 'fsub':
+        elif funct == 0x01:  # fsub
             result = a - b
-        elif op == 'fmul':
+        elif funct == 0x02:  # fmul
             result = a * b
-        elif op == 'fdiv':
+        elif funct == 0x03:  # fdiv
             result = a / b if b != 0.0 else float('inf')
+        elif funct == 0x04:  # fsqrt
+            result = a ** 0.5 if a >= 0.0 else float('nan')
+        elif funct == 0x06:  # fcvt.w.s (float→int)
+            result = float(int(a))
+        elif funct == 0x07:  # fcvt.s.w (int→float)
+            result = float(a)
+        elif funct == 0x08:  # fmin
+            result = a if a < b else b
+        elif funct == 0x09:  # fmax
+            result = a if a > b else b
         else:
             result = 0.0
-        cpu.v[vd] = f32_to_int(result)
+        cpu.v[fd] = f32_to_int(result)
+
+
+def fp_compare(cpu: CPU, fs1: int, fs2: int, aux: int):
+    """Execute F-type fcmp: set CPU flags based on float comparison."""
+    is_f64 = ((aux >> 1) & 0x3) == 1
+    if is_f64:
+        a = int_to_f64(cpu.v[fs1])
+        b = int_to_f64(cpu.v[fs2])
+    else:
+        a = int_to_f32(cpu.v[fs1])
+        b = int_to_f32(cpu.v[fs2])
+    cpu.zf = 1 if a == b else 0
+    cpu.cf = 1 if a < b else 0
+    cpu.sf = 0
+    cpu.of = 0
+
+
+def fp_unary(cpu: CPU, fd: int, fs1: int, aux: int, negate: bool):
+    """Execute F-type unary FP operation: fneg or fabs."""
+    is_f64 = ((aux >> 1) & 0x3) == 1
+    if is_f64:
+        a = int_to_f64(cpu.v[fs1])
+        if negate:
+            result = -a
+        else:
+            result = abs(a)
+        cpu.v[fd] = f64_to_int(result)
+    else:
+        a = int_to_f32(cpu.v[fs1])
+        if negate:
+            result = -a
+        else:
+            result = abs(a)
+        cpu.v[fd] = f32_to_int(result)
 
 
 def execute_one(cpu: CPU, trace: bool = False) -> bool:
@@ -791,14 +869,36 @@ def execute_one(cpu: CPU, trace: bool = False) -> bool:
         elif funct == 0x0B:  # vfmadd
             vs3 = ext & 0xF
             cpu.v[vd] = (cpu.v[vs1] * cpu.v[vs2] + cpu.v[vs3]) & 0xFFFFFFFFFFFFFFFF
-        elif funct == 0x0C:  # vfadd.s
-            fp_execute(cpu, vd, vs1, vs2, 'fadd', aux)
-        elif funct == 0x0D:  # vfsub.s
-            fp_execute(cpu, vd, vs1, vs2, 'fsub', aux)
-        elif funct == 0x0E:  # vfmul.s
-            fp_execute(cpu, vd, vs1, vs2, 'fmul', aux)
-        elif funct == 0x0F:  # vfdiv.s
-            fp_execute(cpu, vd, vs1, vs2, 'fdiv', aux)
+
+        cpu.pc += length
+        cpu.r[0] = 0
+        cpu.steps += 1
+        return True
+
+    # ---- F-type (Scalar FP) ----
+    if (opcode & 0xF0) == 0x70:
+        byte1 = cpu.read_byte(pc + 1)
+        fd = opcode & 0xF
+        fs1 = (byte1 >> 4) & 0xF
+        fs2 = byte1 & 0xF
+        funct = cpu.read_byte(pc + 2)
+        aux = cpu.read_byte(pc + 3)
+
+        if funct in (0x00, 0x01, 0x02, 0x03, 0x08, 0x09):
+            # fadd, fsub, fmul, fdiv, fmin, fmax — two-source
+            fp_execute_f(cpu, fd, fs1, fs2, funct, aux)
+        elif funct == 0x04:  # fsqrt
+            fp_execute_f(cpu, fd, fs1, 0, funct, aux)
+        elif funct == 0x05:  # fcmp
+            fp_compare(cpu, fs1, fs2, aux)
+        elif funct == 0x06:  # fcvt.w.s: float→int
+            fp_execute_f(cpu, fd, fs1, 0, funct, aux)
+        elif funct == 0x07:  # fcvt.s.w: int→float
+            fp_execute_f(cpu, fd, fs1, 0, funct, aux)
+        elif funct == 0x0A:  # fneg
+            fp_unary(cpu, fd, fs1, aux, negate=True)
+        elif funct == 0x0B:  # fabs
+            fp_unary(cpu, fd, fs1, aux, negate=False)
 
         cpu.pc += length
         cpu.r[0] = 0

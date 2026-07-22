@@ -53,17 +53,28 @@ See the full license text in the [`LICENSE`](LICENSE) file or at:
 
 ## Status
 
-**MacroCore-X v1.0** — Initial release, stable core ISA with vector extension placeholders reserved.
+**MacroCore-X v2.0** — Modular ISA with mandatory core and optional extensions.
 
-- ✅ Core integer ISA (98 instructions)
-- ✅ Data transfer, arithmetic, logic, control transfer, system, flags, string operations
-- ⏳ Vector/SIMD extension (under design)
-- ⏳ Decoder RTL (planned)
--## ⏳ Assembler & toolchain (planned)
+## Architecture
+
+**MacroCore-X Core (Mandatory)** — all implementations must include:
+- R-type: Scalar integer arithmetic (add, sub, mul, and, or, xor, etc.)
+- I-type: Immediate operations (movi, addi, subi, etc.)
+- L-type: Load/store (ld, st, ldw, stw, ldb, stb, etc.)
+- B-type: Branch and jump (beq, bne, jmp, call, ret, etc.)
+- C-type: Composite operations (addm, subm, xchg, push, pop, etc.)
+- System-type: System control and debug (syscall, int, cpuid, hlt, etc.)
+
+**Optional Extensions:**
+- F-type (Scalar FP): fadd, fsub, fmul, fdiv, fcmp, fsqrt, fcvt, fmin, fmax, fneg, fabs
+- V-type (Vector): vadd, vsub, vmul, vld, vst, vshuffle, vfmadd, etc.
+- Matrix (Reserved): mmul, macc, etc.
+
 ## ✅ Assembler
 - Full assembler in Python (`assembler.py`): converts MacroCore-X assembly to binary machine code
-- Supports all instruction types: R-type, I-type, L-type, B-type, V-type, C-type, System
-- Scalar FP support: vfadd.s, vfsub.s, vfmul.s, vfdiv.s (f32/f64, IEEE 754)
+- Supports all core ISA types: R-type, I-type, L-type, B-type, C-type, System
+- F-type extension: fadd, fsub, fmul, fdiv, fcmp, fsqrt, fcvt, fmin, fmax, fneg, fabs (f32/f64, IEEE 754)
+- V-type extension: vadd, vsub, vmul, vld, vst, vshuffle, vfmadd
 - Supports labels and branch target resolution
 - Generates hex dump of output binary
 
@@ -80,7 +91,7 @@ See the full license text in the [`LICENSE`](LICENSE) file or at:
 ## 📁 Examples
 - `examples/test_alu.asm`: Tests arithmetic, logical, shift, and comparison operations
 - `examples/fibonacci.asm`: Computes first 10 Fibonacci numbers and stores them in memory
-- `examples/test_fp.asm`: Tests scalar floating-point operations (vfadd.s, vfsub.s, vfmul.s, vfdiv.s)
+- `examples/test_fp.asm`: Tests scalar FP operations (fadd, fsub, fmul, fdiv, fcmp)
 
 ## 🚀 Quick Start
 ```bash
