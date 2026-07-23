@@ -37,7 +37,7 @@ class Instruction:
 # Opcode Tables
 # =============================================================================
 
-# R-type: 2 bytes, byte0 = opcode, byte1 = (Rs1<<4)|Rs2
+# R-type: 4 bytes, byte0 = opcode, byte1 = (Rd<<3)|(Rs1>>2), byte2 = ((Rs1&3)<<6)|(Rs2<<1)|X, byte3 = 0x00
 R_TYPE = {
     'add': 0x00, 'sub': 0x01, 'mul': 0x02, 'div': 0x03, 'divu': 0x04,
     'and': 0x05, 'or': 0x06, 'xor': 0x07, 'shl': 0x08, 'shr': 0x09,
@@ -80,7 +80,7 @@ V_TYPE = {
 }
 
 # F-type: 6 bytes, scalar FP extension (optional)
-# byte0 = 0x70 | Fd, byte1 = (Fs1<<4)|Fs2, byte2 = funct8, byte3 = aux,
+# byte0 = 0xA0 | Fd, byte1 = (Fs1<<4)|Fs2, byte2 = funct8, byte3 = aux,
 # byte4-5 = reserved
 F_TYPE = {
     'fadd': 0x00, 'fsub': 0x01, 'fmul': 0x02, 'fdiv': 0x03,
@@ -96,13 +96,13 @@ C_TYPE = {
 
 # System: 2 or 4 bytes
 SYS_TYPE_2 = {
-    'syscall': 0xA0, 'sysret': 0xA1, 'int': 0xA2, 'iret': 0xA3,
-    'cpuid': 0xA6, 'hlt': 0xA7, 'cli': 0xA8, 'sti': 0xA9,
-    'nop': 0xAA, 'ecall': 0xAB,
+    'syscall': 0xB0, 'sysret': 0xB1, 'int': 0xB2, 'iret': 0xB3,
+    'cpuid': 0xB6, 'hlt': 0xB7, 'cli': 0xB8, 'sti': 0xB9,
+    'nop': 0xBA, 'ecall': 0xBB, 'fence': 0xBC, 'bkpt': 0xBD,
 }
 
 SYS_TYPE_4 = {
-    'rdmsr': 0xA4, 'wrmsr': 0xA5,
+    'rdmsr': 0xB4, 'wrmsr': 0xB5,
 }
 
 # Pseudo-instructions
@@ -386,53 +386,71 @@ class Assembler:
         else:
             raise ValueError(f"Unknown mnemonic '{mnemonic}' at line {inst.line}")
 
-    # ---- R-type ----
+    # ---- R-type (4 bytes) ----
     def _emit_r(self, mnemonic, ops):
+        """Emit 4-byte R-type instruction.
+        byte0 = opcode, byte1 = (Rd<<3)|(Rs1>>2), byte2 = ((Rs1&3)<<6)|(Rs2<<1)|X, byte3 = 0x00
+        Three-operand format: Rd, Rs1, Rs2 (e.g., add r3, r3, r1)
+        clz uses two-operand format: Rd, Rs1 (e.g., clz r5, r3)
+        """
+        rd = parse_reg(ops[0])
         if mnemonic == 'clz':
-            # clz rs1  (1 operand)
-            rs1 = parse_reg(ops[0])
+            rs1 = parse_reg(ops[1])
             rs2 = 0
         else:
-            rs1 = parse_reg(ops[0])
-            rs2 = parse_reg(ops[1])
+            rs1 = parse_reg(ops[1])
+            rs2 = parse_reg(ops[2])
         opcode = R_TYPE[mnemonic]
         self.output.append(opcode)
-        self.output.append((rs1 << 4) | rs2)
-        self.offset += 2
+        self.output.append(((rd & 0x1F) << 3) | ((rs1 >> 2) & 0x7))
+        self.output.append(((rs1 & 0x3) << 6) | ((rs2 & 0x1F) << 1) | 0)
+        self.output.append(0x00)
+        self.offset += 4
 
-    # ---- I-type ----
+    # ---- I-type (4/6 bytes) ----
     def _emit_i(self, mnemonic, ops):
+        """Emit I-type instruction.
+        4-byte: byte0=opcode, byte1=[Rd 5 bits][Rs1[4:2] 3 bits], byte2=[Rs1[1:0] 2 bits][IMM[13:8] 6 bits], byte3=IMM[7:0]
+        6-byte movi: byte0=0x2A, byte1=[Rd 5 bits][000], byte2-5=IMM32 LE
+        """
         opcode = I_TYPE[mnemonic]
-        rd = parse_reg(ops[0])
 
-        if mnemonic in ('shli', 'shri', 'sari'):
-            rs1 = parse_reg(ops[1])
-            imm = parse_imm(ops[2]) & 0x1F
-        elif mnemonic == 'mov':
-            rs1 = 0  # unused
-            imm = parse_imm(ops[1])
-        elif mnemonic == 'movi':
+        if mnemonic == 'movi':
             # 6-byte I-type extension
             rd = parse_reg(ops[0])
             imm = parse_imm(ops[1])
             self._emit_movi(rd, imm)
             return
+
+        rd = parse_reg(ops[0])
+
+        if mnemonic in ('shli', 'shri', 'sari'):
+            rs1 = parse_reg(ops[1])
+            imm = parse_imm(ops[2]) & 0x3F  # 6-bit shift amount
+        elif mnemonic == 'mov':
+            rs1 = 0  # unused
+            imm = parse_imm(ops[1])
         else:
             rs1 = parse_reg(ops[1])
             imm = parse_imm(ops[2])
 
-        # byte0 = opcode, byte1 = (rd << 4) | (rs1 & 0xF)
+        # byte0 = opcode
         self.output.append(opcode)
-        self.output.append(((rd & 0xF) << 4) | (rs1 & 0xF))
-        # byte2-3 = imm16 LE
-        self.output.extend(pack_i16(imm))
+        # byte1 = [Rd[4:0] 5 bits][Rs1[4:2] 3 bits]
+        self.output.append(((rd & 0x1F) << 3) | ((rs1 >> 2) & 0x7))
+        # byte2 = [Rs1[1:0] 2 bits][IMM[13:8] 6 bits]
+        self.output.append(((rs1 & 0x3) << 6) | ((imm >> 8) & 0x3F))
+        # byte3 = IMM[7:0]
+        self.output.append(imm & 0xFF)
         self.offset += 4
 
     def _emit_movi(self, rd, imm):
-        """movi: 6-byte instruction for 32-bit immediate"""
+        """movi: 6-byte instruction for 32-bit immediate.
+        byte0=0x2A, byte1=[Rd 5 bits][000], byte2-5=IMM32 LE
+        """
         opcode = I_TYPE['movi']
         self.output.append(opcode)
-        self.output.append(((rd & 0xF) << 4) | 0)  # rs1 unused
+        self.output.append(((rd & 0x1F) << 3) | 0)  # Rd[4:0] + reserved 3 bits
         self.output.extend(pack_u32(imm))
         self.offset += 6
 
@@ -635,7 +653,7 @@ class Assembler:
     # ---- F-type (Scalar FP) ----
     def _emit_f(self, mnemonic, ops):
         """Emit F-type scalar FP instruction (6 bytes).
-        byte0 = 0x70 | Fd, byte1 = (Fs1<<4)|Fs2, byte2 = funct, byte3 = aux, byte4-5 = reserved
+        byte0 = 0xA0 | Fd, byte1 = (Fs1<<4)|Fs2, byte2 = funct, byte3 = aux, byte4-5 = reserved
         """
         funct = F_TYPE[mnemonic]
 
@@ -657,7 +675,7 @@ class Assembler:
         # prec: 0=f32, 1=f64; rm: 0=RNE, 1=RTZ, 2=RDN, 3=RUP
         aux = 0  # default: f32, RNE
 
-        self.output.append(0x70 | (fd & 0xF))
+        self.output.append(0xA0 | (fd & 0xF))
         self.output.append(((fs1 & 0xF) << 4) | (fs2 & 0xF))
         self.output.append(funct)
         self.output.append(aux)
@@ -719,10 +737,20 @@ class Assembler:
     # ---- System 2-byte ----
     def _emit_sys2(self, mnemonic, ops):
         opcode = SYS_TYPE_2[mnemonic]
-        if ops and mnemonic in ('syscall', 'int', 'ecall'):
+        if ops and mnemonic in ('syscall', 'int', 'ecall', 'bkpt'):
             imm8 = parse_imm(ops[0]) & 0xFF
             self.output.append(opcode)
             self.output.append(imm8)
+        elif mnemonic == 'fence':
+            # fence [PI, PO] — default full barrier (0xFF)
+            if ops:
+                pi = parse_imm(ops[0]) & 0xF
+                po = parse_imm(ops[1]) & 0xF if len(ops) > 1 else pi
+            else:
+                pi = 0xF
+                po = 0xF
+            self.output.append(opcode)
+            self.output.append(((pi & 0xF) << 4) | (po & 0xF))
         else:
             self.output.append(opcode)
             self.output.append(0)

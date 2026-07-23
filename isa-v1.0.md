@@ -1,6 +1,6 @@
 # MacroCore-X v2.0 Instruction Set Architecture Specification
 
-**Version**: 2.0  
+**Version**: 2.1  
 **Status**: Draft  
 **Target**: General-purpose 64-bit desktop/server processors  
 **Encoding**: Variable-length (2/4/6/8 bytes)  
@@ -52,21 +52,23 @@ The **top 2 bits** of the first byte of each instruction determine its total len
 
 | `byte0[7:6]` | Instruction Length | Category Range |
 |--------------|-------------------|----------------|
-| `00` | 2 bytes | R-type (opcodes 0x00–0x1F) |
-| `01` | 4 bytes | I/L/B-type (opcodes 0x20–0x7F) |
-| `10` | 6 bytes | V/C extended types (opcodes 0x80–0xBF) |
+| `00` | 4 bytes | R-type (opcodes 0x00–0x1F) |
+| `01` | 4/6 bytes | I/L/B-type (opcodes 0x20–0x7F) |
+| `10` | 6/8 bytes | V/C/F extended types (opcodes 0x80–0xBF) |
 | `11` | 8 bytes | Long instructions (opcodes 0xC0–0xFF) |
 
 **Decoders must determine the length in the first cycle solely from bits[7:6] of byte0, without parsing subsequent bytes.**
+
+> Note: In the `01` range, `movi` (0x2A) and select L-type indexed variants (0x50–0x5F) are 6 bytes. The decoder distinguishes these via the full opcode byte after the initial length-class determination. In the `10` range, System-type instructions (0xB0–0xBF) are 2 or 4 bytes.
 
 ### 2.2 Instruction Field Definitions
 
 | Field | Abbr. | Width (bits) | Description |
 |-------|-------|--------------|-------------|
 | Opcode | OP | 2–8 | Instruction functionality |
-| Destination register | Rd | 4 | GR number (0–31) |
-| Source register 1 | Rs1 | 4 | GR number |
-| Source register 2 | Rs2 | 4 | GR number |
+| Destination register | Rd | 5 | GR number (0–31) |
+| Source register 1 | Rs1 | 5 | GR number |
+| Source register 2 | Rs2 | 5 | GR number |
 | Immediate | IMM | 5–32 | Sign- or zero-extended |
 | Offset | OFF | 12–21 | Relative jump / memory offset |
 | Extension flags | X | 1–4 | Width / atomic / condition modifiers |
@@ -75,81 +77,101 @@ The **top 2 bits** of the first byte of each instruction determine its total len
 
 | Opcode Range | Category | Length | Primary Use |
 |--------------|----------|--------|-------------|
-| 0x00–0x1F | **R-type** | 2 bytes | Register–register operations |
-| 0x20–0x3F | **I-type** | 4 bytes | Immediate operations / loads |
+| 0x00–0x1F | **R-type** | 4 bytes | Register–register operations |
+| 0x20–0x3F | **I-type** | 4/6 bytes | Immediate operations / loads |
 | 0x40–0x5F | **L-type** | 4/6 bytes | Load / store |
 | 0x60–0x7F | **B-type** | 4 bytes | Branches / jumps |
 | 0x80–0x8F | **V-type** | 6/8 bytes | Vector operations |
 | 0x90–0x9F | **C-type** | 6/8 bytes | Composite memory operations |
-| 0xA0–0xBF | **System-type** | 2/4 bytes | Privileged / management |
+| 0xA0–0xAF | **F-type** | 6 bytes | Scalar FP operations |
+| 0xB0–0xBF | **System-type** | 2/4 bytes | Privileged / management |
 | 0xC0–0xFF | **Reserved** | variable | Future extensions |
 
 ---
 
 ## Chapter 3: Instruction Definitions
 
-### 3.1 R-type Instructions (2 bytes, OP 0x00–0x1F)
+### 3.1 R-type Instructions (4 bytes, OP 0x00–0x1F)
 
-**Format**:
+**Format (4-byte)**:
 ```
-Bits:   7:4       3:0
-        ┌─────────┬─────────┐
-byte0   │ OP      │ subtype │
-        ├─────────┼─────────┤
-byte1   │ Rs1     │ Rs2     │
-        └─────────┴─────────┘
+Bits:   7..0         7..0         7..0         7..0
+        ┌───────────┬───────────┬───────────┬───────────┐
+byte0   │ OP[7:0]               │   Full opcode 0x00–0x1F
+        ├───────────┼───────────┼───────────┼───────────┤
+byte1   │ Rd[4:0]       │ Rs1[4:3]      │   Rd (5 bits) + Rs1 high 3 bits
+        ├───────────┼───────────┼───────────┼───────────┤
+byte2   │ Rs1[2:0]      │ Rs2[4:0]      │X│   Rs1 low + Rs2 (5 bits) + X
+        ├───────────┼───────────┼───────────┼───────────┤
+byte3   │ Reserved (0x00)                       │
+        └───────────┴───────────┴───────────┴───────────┘
 ```
-Note: Rd = Rs1 (destination = source 1), or implied by subtype.
+
+- **Rd**: destination register (5 bits, 0–31)
+- **Rs1**: source register 1 (5 bits, 0–31)
+- **Rs2**: source register 2 (5 bits, 0–31)
+- **X**: extension flag (reserved for future use; must be 0)
+
+Note: For most R-type instructions (except `clz`), Rd = Rs1 (destination = source 1), i.e., the result is written back to the same register as the first source operand. This is an accumulator-style convention for compactness.
 
 #### R-type Instruction List
 
 | OP | Mnemonic | Operands | Semantics |
 |----|----------|----------|-----------|
-| 0x00 | `add` | Rs1, Rs2 | R[Rs1] ← R[Rs1] + R[Rs2] |
-| 0x01 | `sub` | Rs1, Rs2 | R[Rs1] ← R[Rs1] - R[Rs2] |
-| 0x02 | `mul` | Rs1, Rs2 | R[Rs1] ← R[Rs1] × R[Rs2] (low 64 bits) |
-| 0x03 | `div` | Rs1, Rs2 | R[Rs1] ← R[Rs1] ÷ R[Rs2] (signed, truncate toward zero) |
-| 0x04 | `divu` | Rs1, Rs2 | R[Rs1] ← R[Rs1] ÷ R[Rs2] (unsigned) |
-| 0x05 | `and` | Rs1, Rs2 | R[Rs1] ← R[Rs1] & R[Rs2] |
-| 0x06 | `or` | Rs1, Rs2 | R[Rs1] ← R[Rs1] \| R[Rs2] |
-| 0x07 | `xor` | Rs1, Rs2 | R[Rs1] ← R[Rs1] ^ R[Rs2] |
-| 0x08 | `shl` | Rs1, Rs2 | R[Rs1] ← R[Rs1] << (R[Rs2] & 0x3F) |
-| 0x09 | `shr` | Rs1, Rs2 | R[Rs1] ← R[Rs1] >> (R[Rs2] & 0x3F) (logical) |
-| 0x0A | `sar` | Rs1, Rs2 | R[Rs1] ← R[Rs1] >> (R[Rs2] & 0x3F) (arithmetic) |
-| 0x0B | `eq` | Rs1, Rs2 | R[Rs1] ← (R[Rs1] == R[Rs2]) ? 1 : 0 |
-| 0x0C | `lt` | Rs1, Rs2 | R[Rs1] ← (R[Rs1] < R[Rs2]) ? 1 : 0 (signed) |
-| 0x0D | `ltu` | Rs1, Rs2 | R[Rs1] ← (R[Rs1] < R[Rs2]) ? 1 : 0 (unsigned) |
-| 0x0E | `max` | Rs1, Rs2 | R[Rs1] ← max(R[Rs1], R[Rs2]) (signed) |
-| 0x0F | `min` | Rs1, Rs2 | R[Rs1] ← min(R[Rs1], R[Rs2]) (signed) |
-| 0x10 | `ror` | Rs1, Rs2 | R[Rs1] ← R[Rs1] rotate right (R[Rs2] & 0x3F) |
-| 0x11 | `rol` | Rs1, Rs2 | R[Rs1] ← R[Rs1] rotate left (R[Rs2] & 0x3F) |
-| 0x12 | `clz` | Rs1 | R[Rs1] ← count leading zeros of R[Rs1] |
+| 0x00 | `add` | Rd, Rs1, Rs2 | R[Rd] ← R[Rs1] + R[Rs2] |
+| 0x01 | `sub` | Rd, Rs1, Rs2 | R[Rd] ← R[Rs1] - R[Rs2] |
+| 0x02 | `mul` | Rd, Rs1, Rs2 | R[Rd] ← R[Rs1] × R[Rs2] (low 64 bits) |
+| 0x03 | `div` | Rd, Rs1, Rs2 | R[Rd] ← R[Rs1] ÷ R[Rs2] (signed, truncate toward zero) |
+| 0x04 | `divu` | Rd, Rs1, Rs2 | R[Rd] ← R[Rs1] ÷ R[Rs2] (unsigned) |
+| 0x05 | `and` | Rd, Rs1, Rs2 | R[Rd] ← R[Rs1] & R[Rs2] |
+| 0x06 | `or` | Rd, Rs1, Rs2 | R[Rd] ← R[Rs1] \| R[Rs2] |
+| 0x07 | `xor` | Rd, Rs1, Rs2 | R[Rd] ← R[Rs1] ^ R[Rs2] |
+| 0x08 | `shl` | Rd, Rs1, Rs2 | R[Rd] ← R[Rs1] << (R[Rs2] & 0x3F) |
+| 0x09 | `shr` | Rd, Rs1, Rs2 | R[Rd] ← R[Rs1] >> (R[Rs2] & 0x3F) (logical) |
+| 0x0A | `sar` | Rd, Rs1, Rs2 | R[Rd] ← R[Rs1] >> (R[Rs2] & 0x3F) (arithmetic) |
+| 0x0B | `eq` | Rd, Rs1, Rs2 | R[Rd] ← (R[Rs1] == R[Rs2]) ? 1 : 0 |
+| 0x0C | `lt` | Rd, Rs1, Rs2 | R[Rd] ← (R[Rs1] < R[Rs2]) ? 1 : 0 (signed) |
+| 0x0D | `ltu` | Rd, Rs1, Rs2 | R[Rd] ← (R[Rs1] < R[Rs2]) ? 1 : 0 (unsigned) |
+| 0x0E | `max` | Rd, Rs1, Rs2 | R[Rd] ← max(R[Rs1], R[Rs2]) (signed) |
+| 0x0F | `min` | Rd, Rs1, Rs2 | R[Rd] ← min(R[Rs1], R[Rs2]) (signed) |
+| 0x10 | `ror` | Rd, Rs1, Rs2 | R[Rd] ← R[Rs1] rotate right (R[Rs2] & 0x3F) |
+| 0x11 | `rol` | Rd, Rs1, Rs2 | R[Rd] ← R[Rs1] rotate left (R[Rs2] & 0x3F) |
+| 0x12 | `clz` | Rd, Rs1 | R[Rd] ← count leading zeros of R[Rs1] |
 
 > All R-type instructions update FLAGS: CF/ZF/SF/OF (for arithmetic/logic); `eq`/`lt`/`ltu` update only ZF; `clz` does not update flags.
 
 ---
 
-### 3.2 I-type Instructions (4 bytes, OP 0x20–0x3F)
+### 3.2 I-type Instructions (4/6 bytes, OP 0x20–0x3F)
 
-**Format** (pseudocode representation; actual bit packing is compact):
+**Format (4-byte)**:
 ```
-byte0: [OP 6 bits][Rd high 2 bits]
-byte1: [Rd low 2 bits][Rs1 4 bits][X 2 bits]
-byte2-3: IMM16 (little-endian)
+byte0: [OP 8 bits]
+byte1: [Rd[4:0] 5 bits][Rs1[4:2] 3 bits]
+byte2: [Rs1[1:0] 2 bits][IMM[13:8] 6 bits]
+byte3: [IMM[7:0] 8 bits]
+```
+IMM is a 14-bit immediate (byte2[5:0]||byte3[7:0]), sign-extended to 64 bits for most instructions.
+
+**Format (6-byte, `movi` only)**:
+```
+byte0: [OP 8 bits = 0x2A]
+byte1: [Rd[4:0] 5 bits][000 3 bits]
+byte2-5: IMM32 (little-endian, zero-extended)
 ```
 
 | OP | Mnemonic | Operands | Semantics |
 |----|----------|----------|-----------|
-| 0x20 | `addi` | Rd, Rs1, imm16 | R[Rd] ← R[Rs1] + sext(imm16) |
-| 0x21 | `subi` | Rd, Rs1, imm16 | R[Rd] ← R[Rs1] - sext(imm16) |
-| 0x22 | `muli` | Rd, Rs1, imm16 | R[Rd] ← R[Rs1] × sext(imm16) |
-| 0x23 | `andi` | Rd, Rs1, imm16 | R[Rd] ← R[Rs1] & zext(imm16) |
-| 0x24 | `ori` | Rd, Rs1, imm16 | R[Rd] ← R[Rs1] \| zext(imm16) |
-| 0x25 | `xori` | Rd, Rs1, imm16 | R[Rd] ← R[Rs1] ^ zext(imm16) |
-| 0x26 | `shli` | Rd, Rs1, imm5 | R[Rd] ← R[Rs1] << imm5 (IMM[4:0]) |
-| 0x27 | `shri` | Rd, Rs1, imm5 | R[Rd] ← R[Rs1] >> imm5 (logical) |
-| 0x28 | `sari` | Rd, Rs1, imm5 | R[Rd] ← R[Rs1] >> imm5 (arithmetic) |
-| 0x29 | `mov` | Rd, imm16 | R[Rd] ← sext(imm16) |
+| 0x20 | `addi` | Rd, Rs1, imm14 | R[Rd] ← R[Rs1] + sext(imm14) |
+| 0x21 | `subi` | Rd, Rs1, imm14 | R[Rd] ← R[Rs1] - sext(imm14) |
+| 0x22 | `muli` | Rd, Rs1, imm14 | R[Rd] ← R[Rs1] × sext(imm14) |
+| 0x23 | `andi` | Rd, Rs1, imm14 | R[Rd] ← R[Rs1] & zext(imm14) |
+| 0x24 | `ori` | Rd, Rs1, imm14 | R[Rd] ← R[Rs1] \| zext(imm14) |
+| 0x25 | `xori` | Rd, Rs1, imm14 | R[Rd] ← R[Rs1] ^ zext(imm14) |
+| 0x26 | `shli` | Rd, Rs1, imm6 | R[Rd] ← R[Rs1] << imm6 (IMM[5:0]) |
+| 0x27 | `shri` | Rd, Rs1, imm6 | R[Rd] ← R[Rs1] >> imm6 (logical) |
+| 0x28 | `sari` | Rd, Rs1, imm6 | R[Rd] ← R[Rs1] >> imm6 (arithmetic) |
+| 0x29 | `mov` | Rd, imm14 | R[Rd] ← sext(imm14) |
 | 0x2A | `movi` | Rd, imm32 | R[Rd] ← zext(imm32) (6-byte extension) |
 | 0x2B-0x3F | *Reserved* | — | — |
 
@@ -229,41 +251,69 @@ byte2-3: IMM12 low 8 bits + padding
 
 ---
 
-### 3.5 F-type Instructions (Scalar FP Extension, Optional, 6 bytes, OP 0x70–0x7F)
+### 3.5 F-type Instructions (Scalar FP Extension, Optional, 6 bytes, OP 0xA0–0xAF)
 
 **Format (6-byte)**:
 ```
-byte0:   [0x7 4 bits][Fd 4 bits]
+byte0:   [0xA 4 bits][Fd 4 bits]
 byte1:   [Fs1 4 bits][Fs2 4 bits]
 byte2:   FUNCT8 (operation code)
 byte3:   AUX  [rm 3 bits][prec 2 bits][rsv 3 bits]
 byte4-5: Reserved
 ```
 
-- **Fd**: destination V register (scalar float result)
-- **Fs1, Fs2**: source V registers (scalar float operands)
+- **Fd**: destination V register (scalar float result, 0–31)
+- **Fs1, Fs2**: source V registers (scalar float operands, 0–31)
 - **FUNCT8**: operation code
 - **AUX**: precision and rounding mode
   - `prec` (bits [2:1]): 0 = f32, 1 = f64
   - `rm` (bits [6:3]): rounding mode (0 = RNE, 1 = RTZ, 2 = RDN, 3 = RUP)
 
+#### F-type Register Model: V-Register Sub-View
+
+F-type scalar floating-point instructions operate on the **V register file** as a **sub-view**. Specifically:
+
+- F-type instructions only access the **low 64 bits** of each V register (256-bit).
+- The upper 192 bits of the V register are **ignored** on reads and **preserved** on writes.
+- This means F-type and V-type instructions can coexist: scalar FP operations use the low 64 bits, while vector operations use the full 256-bit width.
+- From the compiler's perspective, F-type operands are V registers — no separate register file is needed. The ABI treats V0–V31 as both scalar FP and vector registers.
+
+> This design avoids register file duplication while maintaining clean separation between scalar FP and vector operations at the instruction level.
+
 | FUNCT | Mnemonic | Operands | Semantics |
 |----|----------|----------|-----------|
-| 0x00 | `fadd` | Fd, Fs1, Fs2 | V[Fd] ← float(V[Fs1]) + float(V[Fs2]) |
-| 0x01 | `fsub` | Fd, Fs1, Fs2 | V[Fd] ← float(V[Fs1]) - float(V[Fs2]) |
-| 0x02 | `fmul` | Fd, Fs1, Fs2 | V[Fd] ← float(V[Fs1]) × float(V[Fs2]) |
-| 0x03 | `fdiv` | Fd, Fs1, Fs2 | V[Fd] ← float(V[Fs1]) ÷ float(V[Fs2]) |
-| 0x04 | `fsqrt` | Fd, Fs1 | V[Fd] ← sqrt(float(V[Fs1])) |
-| 0x05 | `fcmp` | Fs1, Fs2 | ZF ← (V[Fs1]==V[Fs2]); CF ← (V[Fs1]<V[Fs2]) |
-| 0x06 | `fcvt.w.s` | Fd, Fs1 | V[Fd] ← int(float(V[Fs1])) (truncate) |
-| 0x07 | `fcvt.s.w` | Fd, Fs1 | V[Fd] ← float(int(V[Fs1])) |
-| 0x08 | `fmin` | Fd, Fs1, Fs2 | V[Fd] ← min(float(V[Fs1]), float(V[Fs2])) |
-| 0x09 | `fmax` | Fd, Fs1, Fs2 | V[Fd] ← max(float(V[Fs1]), float(V[Fs2])) |
-| 0x0A | `fneg` | Fd, Fs1 | V[Fd] ← -float(V[Fs1]) |
-| 0x0B | `fabs` | Fd, Fs1 | V[Fd] ← abs(float(V[Fs1])) |
+| 0x00 | `fadd` | Fd, Fs1, Fs2 | V[Fd].lo64 ← float(V[Fs1].lo64) + float(V[Fs2].lo64) |
+| 0x01 | `fsub` | Fd, Fs1, Fs2 | V[Fd].lo64 ← float(V[Fs1].lo64) - float(V[Fs2].lo64) |
+| 0x02 | `fmul` | Fd, Fs1, Fs2 | V[Fd].lo64 ← float(V[Fs1].lo64) × float(V[Fs2].lo64) |
+| 0x03 | `fdiv` | Fd, Fs1, Fs2 | V[Fd].lo64 ← float(V[Fs1].lo64) ÷ float(V[Fs2].lo64) |
+| 0x04 | `fsqrt` | Fd, Fs1 | V[Fd].lo64 ← sqrt(float(V[Fs1].lo64)) |
+| 0x05 | `fcmp` | Fs1, Fs2 | ZF ← (V[Fs1].lo64==V[Fs2].lo64); CF ← (V[Fs1].lo64<V[Fs2].lo64) |
+| 0x06 | `fcvt.w.s` | Fd, Fs1 | V[Fd].lo64 ← int(float(V[Fs1].lo64)) (truncate) |
+| 0x07 | `fcvt.s.w` | Fd, Fs1 | V[Fd].lo64 ← float(int(V[Fs1].lo64)) |
+| 0x08 | `fmin` | Fd, Fs1, Fs2 | V[Fd].lo64 ← min(float(V[Fs1].lo64), float(V[Fs2].lo64)) |
+| 0x09 | `fmax` | Fd, Fs1, Fs2 | V[Fd].lo64 ← max(float(V[Fs1].lo64), float(V[Fs2].lo64)) |
+| 0x0A | `fneg` | Fd, Fs1 | V[Fd].lo64 ← -float(V[Fs1].lo64) |
+| 0x0B | `fabs` | Fd, Fs1 | V[Fd].lo64 ← abs(float(V[Fs1].lo64)) |
 | 0x0C-0xFF | *Reserved* | — | — |
 
-> F-type uses the same V register file as the vector extension. Scalar FP operations interpret the low 32 bits (f32) or full 64 bits (f64) of the V register as IEEE 754 floating-point values.
+> Where `.lo64` denotes the low 64 bits of the V register. The upper 192 bits of V[Fd] are preserved unchanged.
+
+#### 3.5.1 Floating-Point Status Register (CSR_FSR, 0x00A)
+
+The FSR captures floating-point exception flags:
+
+| Bit | Name | Description |
+|-----|------|-------------|
+| 0 | NV | Invalid operation (e.g., 0/0, sqrt(-1), ∞−∞) |
+| 1 | DZ | Divide by zero |
+| 2 | OF | Overflow (result too large) |
+| 3 | UF | Underflow (result too small, subnormal) |
+| 4 | NX | Inexact (result rounded) |
+| 7:5 | Rsv | Reserved |
+
+- FSR flags are **sticky** — once set, they remain set until cleared by writing 0 to the corresponding bit via `wrmsr`.
+- Floating-point exceptions do **not** raise #FP exception by default. Software must poll CSR_FSR or configure trapping via a future CSR_FCR (floating-point control register).
+- When an FP operation produces NaN, infinite, or a subnormal, the corresponding FSR flag is set and the operation proceeds with the IEEE 754 default result.
 
 ---
 
@@ -306,6 +356,19 @@ For vector instructions, element width is specified by the low 2 bits of AUX (by
 | 0x0B | `vfmadd` | Vd, Vs1, Vs2, Vs3 | V[Vd][i] ← V[Vs1][i]×V[Vs2][i]+V[Vs3][i] (8 bytes) |
 | 0x0C-0xFF | *Reserved* | — | — |
 
+#### 3.6.1 Vector Masking
+
+Vector instructions support per-element masking via the AUX byte (byte3):
+
+- **AUX[3]** (mask enable): 0 = no masking (all elements active), 1 = masking enabled
+- **AUX[2]** (mask polarity): 0 = mask=0 means element inactive, 1 = mask=0 means element active
+- When masking is enabled, the **mask register** is implicitly **V0**. Each bit of the V0 register's low N bits (where N = 256 / element_width) controls whether the corresponding element of the destination is written.
+  - Mask bit = 0: element is **inactive** (destination element preserved, no exception from masked element)
+  - Mask bit = 1: element is **active** (normal operation)
+- Mask polarity (AUX[2]) can invert this: 0 = active, 1 = inactive.
+
+> Example: For a 32-bit element vector operation (8 elements), V0[7:0] serves as the mask bits. If V0 = 0x0000...0005 (bits 0 and 2 set), only elements 0 and 2 are active.
+
 ---
 
 ### 3.7 C-type Instructions (Composite CISC, 6/8 bytes, OP 0x90–0x9F)
@@ -328,23 +391,25 @@ All C-type instructions are decomposed into multiple µops at the microarchitect
 
 ---
 
-### 3.8 System Instructions (2/4 bytes, OP 0xA0–0xBF)
+### 3.8 System Instructions (2/4 bytes, OP 0xB0–0xBF)
 
 | OP | Mnemonic | Operands | Semantics | Length |
 |----|----------|----------|-----------|--------|
-| 0xA0 | `syscall` | imm8 | Raise system call (imm8 → syscall number, enter kernel mode) | 2 |
-| 0xA1 | `sysret` | — | Return from system call (restore user mode) | 2 |
-| 0xA2 | `int` | imm8 | Software interrupt (imm8 → interrupt vector) | 2 |
-| 0xA3 | `iret` | — | Return from interrupt | 2 |
-| 0xA4 | `rdmsr` | Rs1, imm12 | R[Rs1] ← MSR[imm12] | 4 |
-| 0xA5 | `wrmsr` | Rs1, imm12 | MSR[imm12] ← R[Rs1] | 4 |
-| 0xA6 | `cpuid` | — | Fill R0:R1:R2:R3 with vendor/features/cache/version info | 2 |
-| 0xA7 | `hlt` | — | Halt execution until interrupt | 2 |
-| 0xA8 | `cli` | — | Clear interrupt enable flag (IF=0) | 2 |
-| 0xA9 | `sti` | — | Set interrupt enable flag (IF=1) | 2 |
-| 0xAA | `nop` | — | No operation (PC ← PC + 2) | 2 |
-| 0xAB | `ecall` | imm8 | Environment call (emulator/debug entry point) | 2 |
-| 0xAC-0xBF | *Reserved* | — | — | variable |
+| 0xB0 | `syscall` | imm8 | Raise system call (imm8 → syscall number, enter kernel mode) | 2 |
+| 0xB1 | `sysret` | — | Return from system call (restore user mode) | 2 |
+| 0xB2 | `int` | imm8 | Software interrupt (imm8 → interrupt vector) | 2 |
+| 0xB3 | `iret` | — | Return from interrupt | 2 |
+| 0xB4 | `rdmsr` | Rs1, imm12 | R[Rs1] ← MSR[imm12] | 4 |
+| 0xB5 | `wrmsr` | Rs1, imm12 | MSR[imm12] ← R[Rs1] | 4 |
+| 0xB6 | `cpuid` | — | Fill R0:R1:R2:R3 with vendor/features/cache/version info | 2 |
+| 0xB7 | `hlt` | — | Halt execution until interrupt | 2 |
+| 0xB8 | `cli` | — | Clear interrupt enable flag (IF=0) | 2 |
+| 0xB9 | `sti` | — | Set interrupt enable flag (IF=1) | 2 |
+| 0xBA | `nop` | — | No operation (PC ← PC + 2) | 2 |
+| 0xBB | `ecall` | imm8 | Environment call (emulator/debug entry point) | 2 |
+| 0xBC | `fence` | — | Memory fence / barrier (see §5.3) | 2 |
+| 0xBD | `bkpt` | imm8 | Hardware breakpoint (debug) | 2 |
+| 0xBE-0xBF | *Reserved* | — | — | variable |
 
 ---
 
@@ -373,6 +438,106 @@ All C-type instructions are decomposed into multiple µops at the microarchitect
 
 `iret` restores from exception: FLAGS ← EF, PC ← ERR.
 
+### 4.3 Control and Status Registers (CSRs)
+
+CSRs are accessed via `rdmsr` (0xB4) and `wrmsr` (0xB5) instructions. The CSR address space is 12 bits (0x000–0xFFF).
+
+| CSR# | Name | Width | Description |
+|------|------|-------|-------------|
+| 0x000 | `CSR_ERR` | 64 | Exception return PC (saved on exception, restored by `iret`) |
+| 0x001 | `CSR_EF` | 8 | Exception flags (saved FLAGS on exception) |
+| 0x002 | `CSR_MODE` | 64 | Mode register: PRIV[0], ALIGN[1], VLEN[3:2], reserved[63:4] |
+| 0x003 | `CSR_CR3` | 64 | Page table base address (physical address of root page table) |
+| 0x004 | `CSR_IVEC` | 64 | Exception vector table base address (default: 0x0000) |
+| 0x005 | `CSR_IE` | 32 | Interrupt enable mask (bit-per-interrupt, see §4.4) |
+| 0x006 | `CSR_IP` | 32 | Interrupt pending register (read-only) |
+| 0x007 | `CSR_IPI` | 64 | Inter-processor interrupt: write to send IPI to target core |
+| 0x008 | `CSR_TIMER` | 64 | Timer counter (counts up at a fixed frequency) |
+| 0x009 | `CSR_TIMECMP` | 64 | Timer compare: interrupt when CSR_TIMER >= CSR_TIMECMP |
+| 0x00A | `CSR_FSR` | 8 | Floating-point status register (see §3.5.1) |
+| 0x00B | `CSR_DBGCTL` | 64 | Debug control register (see §4.5) |
+| 0x00C–0x01F | `CSR_PMC0`–`CSR_PMC19` | 64 | Performance monitor counters 0–19 (see §4.6) |
+| 0x020–0x03F | *Reserved* | — | Future standard CSRs |
+| 0x040–0xFFF | *Vendor-defined* | — | Implementation-specific CSRs |
+
+#### CSR Field Details
+
+**CSR_MODE (0x002)**:
+- bit [0]: PRIV — 0 = kernel, 1 = user
+- bit [1]: ALIGN — 0 = allow unaligned access, 1 = trap on unaligned
+- bit [3:2]: VLEN — vector length: 00 = 128-bit, 01 = 256-bit, 10 = 512-bit, 11 = reserved
+- bit [63:4]: Reserved (must be 0)
+
+**CSR_CR3 (0x003)**:
+- bit [63:12]: Physical page number (PPN) of the root page table
+- bit [11:0]: Reserved (must be 0, ensures 4KB alignment)
+
+### 4.4 Interrupt Controller
+
+#### 4.4.1 Interrupt Numbers
+
+| IRQ# | Type | Description |
+|------|------|-------------|
+| 0 | Timer | Timer interrupt (CSR_TIMER >= CSR_TIMECMP) |
+| 1 | IPI | Inter-processor interrupt (from another core) |
+| 2–15 | External | External hardware IRQ lines (platform-defined) |
+| 16–31 | Software | Software-generated interrupts (`int` instruction) |
+
+#### 4.4.2 Interrupt Control
+
+- **CSR_IE** (0x005): Each bit controls whether the corresponding interrupt is enabled (1 = enabled). Bit 0 = Timer, bit 1 = IPI, bits 2–15 = external IRQs.
+- **CSR_IP** (0x006): Read-only register indicating pending interrupts. Bit layout matches CSR_IE.
+- **CSR_IPI** (0x007): Writing (core_id << 16) | (vector & 0xF) sends an IPI to the specified core. The receiving core sees CSR_IP bit 1 set.
+
+#### 4.4.3 Interrupt Priority
+
+Decreasing priority order:
+1. Machine check (non-maskable)
+2. External interrupts (IRQ 2–15) — highest IRQ# = highest priority
+3. Timer (IRQ 0)
+4. IPI (IRQ 1)
+5. Software interrupts (IRQ 16–31)
+
+### 4.5 Debug Interface
+
+#### 4.5.1 Debug Mode Entry
+
+- **Hardware Breakpoint**: `bkpt imm8` instruction (0xBD) triggers entry to debug mode if CSR_DBGCTL[0] (DBE) = 1.
+- **Single-step**: When CSR_DBGCTL[1] (SSE) = 1, the CPU enters debug mode after executing each instruction.
+- Debug mode saves PC to CSR_ERR and FLAGS to CSR_EF, then jumps to the debug handler at CSR_DBGCTL[63:12] << 12.
+
+#### 4.5.2 Debug Control Register (CSR_DBGCTL, 0x00B)
+
+| Bit | Name | Description |
+|-----|------|-------------|
+| 0 | DBE | Debug enable (1 = respond to `bkpt`) |
+| 1 | SSE | Single-step enable |
+| 63:12 | DBGHADDR | Debug handler base address (page-aligned) |
+
+### 4.6 Performance Counters (PMC)
+
+20 performance monitor counters (CSR_PMC0–CSR_PMC19, CSRs 0x00C–0x01F) for hardware performance monitoring:
+
+| CSR# | Counter | Default Event |
+|------|---------|---------------|
+| 0x00C | PMC0 | Instructions retired |
+| 0x00D | PMC1 | CPU cycles |
+| 0x00E | PMC2 | Branch instructions |
+| 0x00F | PMC3 | Branch mispredictions |
+| 0x010 | PMC4 | L1 data cache accesses |
+| 0x011 | PMC5 | L1 data cache misses |
+| 0x012 | PMC6 | L1 instruction cache accesses |
+| 0x013 | PMC7 | L1 instruction cache misses |
+| 0x014 | PMC8 | TLB misses |
+| 0x015 | PMC9 | Page faults |
+| 0x016 | PMC10 | FP operations |
+| 0x017 | PMC11 | Vector operations |
+| 0x018 | PMC12 | Store buffer full stalls |
+| 0x019 | PMC13 | Load-use interlock stalls |
+| 0x01A–0x01F | PMC14–PMC19 | Implementation-defined |
+
+> All PMCs are 64-bit wraparound counters. They are readable via `rdmsr` and can be reset by writing 0 via `wrmsr`.
+
 ---
 
 ## Chapter 5: Memory Model
@@ -380,19 +545,99 @@ All C-type instructions are decomposed into multiple µops at the microarchitect
 ### 5.1 Address Space
 
 - 64-bit flat address space, virtual address width **48 bits** (current implementation), physical address width **52 bits** (configurable).
-- Supports 4KB, 2MB, and 1GB pages (implementation-defined by MMU).
+- Supports 4KB, 2MB, and 1GB pages.
 
-### 5.2 Alignment Policy
+### 5.2 Page Table Format
 
-The MODE.ALIGN bit controls behavior:
+MacroCore-X uses a 4-level hierarchical page table (similar to x86_64 and RISC-V Sv39/Sv48).
+
+#### 5.2.1 Page Table Entry (PTE) Format
+
+Each PTE is 8 bytes (64 bits):
+
+```
+Bits:  63:52         51:12          11:9  8   7   6   5   4   3   2   1   0
+       ┌─────────────┬───────────────┬─────┬───┬───┬───┬───┬───┬───┬───┬───┐
+       │ Reserved    │ PPN[51:12]    │ Rsv │ G │ U │ A │ D │ W │ X │ R │ V │
+       └─────────────┴───────────────┴─────┴───┴───┴───┴───┴───┴───┴───┴───┘
+```
+
+| Bit | Name | Description |
+|-----|------|-------------|
+| 0 | V | Valid — 1 = PTE is valid |
+| 1 | R | Readable — 1 = read access allowed |
+| 2 | X | Executable — 1 = execute access allowed |
+| 3 | W | Writable — 1 = write access allowed |
+| 4 | D | Dirty — set by hardware on first write to the page |
+| 5 | A | Accessed — set by hardware on first access to the page |
+| 6 | U | User — 1 = accessible in user mode (PRIV=1) |
+| 7 | G | Global — 1 = global mapping (not flushed on TLB context switch) |
+| 11:8 | Rsv | Reserved for future use |
+| 51:12 | PPN | Physical page number (40 bits for 4KB pages) |
+| 63:52 | Rsv | Reserved (must be 0) |
+
+#### 5.2.2 Page Sizes
+
+| Page Size | PPN Bits Used | PTE Level | Identifier |
+|-----------|---------------|-----------|------------|
+| 4KB | PPN[51:12] | Level 0 (leaf) | Standard page |
+| 2MB | PPN[51:21] | Level 1 (leaf) | Large page (PTE[51:21]) |
+| 1GB | PPN[51:30] | Level 2 (leaf) | Huge page (PTE[51:30]) |
+
+Large/huge pages are identified by setting the leaf PTE at the corresponding level (not as a pointer to the next level).
+
+#### 5.2.3 Virtual Address Breakdown (4KB pages)
+
+```
+Bits:  63:48         47:39       38:30       29:21       20:12       11:0
+       ┌─────────────┬───────────┬───────────┬───────────┬───────────┬──────┐
+       │ Sign-ext    │ VPN[3]    │ VPN[2]    │ VPN[1]    │ VPN[0]    │ Off  │
+       └─────────────┴───────────┴───────────┴───────────┴───────────┴──────┘
+          (16 bits)    (9 bits)    (9 bits)    (9 bits)    (9 bits)    (12 bits)
+```
+
+- VPN[3] indexes the Level 3 (root) page table
+- VPN[2] indexes the Level 2 page table
+- VPN[1] indexes the Level 1 page table
+- VPN[0] indexes the Level 0 (leaf) page table
+- CSR_CR3 points to the physical base of the Level 3 page table
+
+### 5.3 Alignment Policy
+
+The CSR_MODE.ALIGN bit controls behavior:
 - `0`: Unaligned accesses are permitted (handled by microarchitecture)
 - `1`: Unaligned accesses raise #alignment fault
 
-### 5.3 Memory Ordering
+### 5.4 Memory Ordering
 
-**Weak Memory Model** — no ordering guarantees. A `fence` instruction (reserved opcode 0xAC) is required to enforce ordering.
+**Weak Memory Model** — no ordering guarantees between different memory accesses unless explicitly enforced.
 
-`fence` instruction format is reserved (encoding not yet assigned).
+#### 5.4.1 fence Instruction
+
+**Format (2-byte)**:
+```
+byte0: 0xBC
+byte1: [PI 4 bits][PO 4 bits]
+```
+
+- **PI** (Predecessor Input): memory operations that must complete before the fence
+- **PO** (Predecessor Output): memory operations that must complete before the fence
+- `PI`/`PO` encoding: bit 0 = Load, bit 1 = Store, bits 2–3 = reserved
+
+| Encoding | Mnemonic | Semantics |
+|----------|----------|-----------|
+| `fence` (PI=0xF, PO=0xF) | Full barrier | All previous loads and stores complete before any subsequent loads/stores |
+| `fence w, w` (PI=0x2, PO=0x2) | Store-store barrier | All previous stores complete before subsequent stores |
+| `fence r, r` (PI=0x1, PO=0x1) | Load-load barrier | All previous loads complete before subsequent loads |
+| `fence rw, rw` (PI=0x3, PO=0x3) | Load+store barrier | All previous loads/stores complete before subsequent loads/stores |
+
+#### 5.4.2 Atomic Instructions and Memory Ordering
+
+- **`xchg`** (0x92): Implicit **full memory barrier** (acquire + release). Equivalent to a `fence rw, rw` embedded in the instruction.
+- **`cmpxchg`** (0x93): Implicit **full memory barrier**. Both the load-compare and conditional-store phases are atomic with respect to other memory operations.
+- **`addm`** / **`subm`** (0x90–0x91): These are **NOT atomic** at the ISA level (decomposed into ld→alu→st µops). Use `cmpxchg` in a loop for atomic read-modify-write.
+
+> Rationale: `xchg` and `cmpxchg` provide implicit full barriers (similar to x86 `lock` prefix) to simplify lock-free programming. Software that requires weaker ordering should use regular loads/stores with explicit `fence` instructions.
 
 ---
 
@@ -406,14 +651,17 @@ The MODE.ALIGN bit controls behavior:
 
 **Examples**:
 ```
-add r1, r2          # R-type: r1 = r1 + r2
-addi r3, r1, 0x100  # I-type: r3 = r1 + 256
-ld r4, [r2 + 0x8]   # Load 64-bit
-st r5, [r3 - 0x4]   # Store 64-bit
-call 0x10000        # Function call
-vadd v1, v2, v3     # Vector addition
-push r6             # Push to stack
-syscall 0x1         # System call
+add r1, r1, r2       # R-type: r1 = r1 + r2 (Rd = Rs1 for accumulator convention)
+addi r3, r1, 0x100    # I-type: r3 = r1 + 256
+ld r4, [r2 + 0x8]     # Load 64-bit
+st r5, [r3 - 0x4]     # Store 64-bit
+call 0x10000          # Function call
+fadd v2, v0, v1       # F-type scalar FP addition
+vadd v1, v2, v3       # V-type vector addition
+push r6               # Push to stack
+syscall 0x1           # System call
+fence                 # Full memory barrier
+bkpt 0                # Breakpoint with debug code 0
 ```
 
 ### 6.2 Pseudo-Instructions
@@ -440,8 +688,32 @@ Requires definition of:
 Convention (Linux x86_64 compatible, simplified):
 - System call number: R1
 - Arguments 1–6: R2–R7
-- Return value: R1
+- **Return value**: R1 (success = 0 or positive; failure = negative errno, e.g., -ENOMEM)
+- **Error indication**: Return value in range [-4095, -1] indicates an error. The absolute value is the errno.
+- **Caller-saved registers**: R1–R15 (may be clobbered by the kernel)
+- **Callee-saved registers**: R16–R23, R30–R31 (preserved across syscall)
+- **R0**: Always 0 (hardwired)
+- **SP (R2)**: Should be valid; kernel may access user stack for certain syscalls (e.g., `execve`)
 - System call instruction: `syscall 0x0` (uses syscall number from R1)
+- No vsyscall/vDSO in the current version; fast syscalls may be implemented via the kernel's syscall page in future versions.
+
+#### Standard Syscall Numbers
+
+| # | Name | R2 | R3 | R4 | Description |
+|---|------|----|----|----|-------------|
+| 0 | `exit` | status | — | — | Terminate process |
+| 1 | `write` | fd | buf | count | Write to file descriptor |
+| 2 | `read` | fd | buf | count | Read from file descriptor |
+| 3 | `open` | path | flags | mode | Open file |
+| 4 | `close` | fd | — | — | Close file descriptor |
+| 5 | `mmap` | addr | len | prot/flags/fd/off | Map memory |
+| 6 | `munmap` | addr | len | — | Unmap memory |
+| 7 | `brk` | addr | — | — | Change program break |
+| 8 | `fork` | — | — | — | Create child process |
+| 9 | `execve` | path | argv | envp | Execute program |
+| 10 | `waitpid` | pid | status | options | Wait for child |
+| 11–63 | *Reserved* | — | — | — | POSIX-compatible |
+| 64–255 | *Custom* | — | — | — | Implementation-defined |
 
 ---
 
@@ -449,15 +721,17 @@ Convention (Linux x86_64 compatible, simplified):
 
 | Mnemonic | byte0 (hex) | Length | Format |
 |----------|-------------|--------|--------|
-| `add` | 0x00 | 2 | R |
-| `sub` | 0x01 | 2 | R |
-| `mul` | 0x02 | 2 | R |
-| `div` | 0x03 | 2 | R |
-| `divu` | 0x04 | 2 | R |
+| `add` | 0x00 | 4 | R |
+| `sub` | 0x01 | 4 | R |
+| `mul` | 0x02 | 4 | R |
+| `div` | 0x03 | 4 | R |
+| `divu` | 0x04 | 4 | R |
 | ... (full table omitted for brevity) | | | |
-| `syscall` | 0xA0 | 2 | SYS |
-| `cpuid` | 0xA6 | 2 | SYS |
-| `nop` | 0xAA | 2 | SYS |
+| `syscall` | 0xB0 | 2 | SYS |
+| `cpuid` | 0xB6 | 2 | SYS |
+| `nop` | 0xBA | 2 | SYS |
+| `fence` | 0xBC | 2 | SYS |
+| `bkpt` | 0xBD | 2 | SYS |
 
 > Complete encoding tables require operand packers; this document provides the authoritative reference.
 
@@ -470,10 +744,20 @@ Convention (Linux x86_64 compatible, simplified):
 | 2/4/6/8-byte variable length | Decoder determines length in first cycle via top 2 bits—balances density and decode speed |
 | R0 hardwired to zero | Simplifies compiler (common zero value) and common code patterns |
 | R31 hardware return address | Eliminates extra `jalr` instruction—`call`/`ret` more efficient |
-| No scalar floating-point instructions | Unified vector instructions handle FP (V-type supports FP) |
-| Weak memory model | Suitable for multi-core; `fence` reserved for future ordering |
+| R-type 4 bytes (v2.1) | Extended from 2 bytes to support full 32-register file (5-bit fields); resolves v2.0 density vs. register count contradiction |
+| F-type at 0xA0–0xAF (v2.1) | Moved from 0x70–0x7F to the `10` range (6-byte zone) to maintain the "top 2 bits = length" hard decoding rule |
+| F-type as V-register sub-view | Scalar FP operates on low 64 bits of V registers; avoids separate register file and keeps scalar/vector FP unified |
+| Weak memory model | Suitable for multi-core; `fence` and implicit barriers in `xchg`/`cmpxchg` provide ordering control |
+| Implicit full barriers in atomics | `xchg`/`cmpxchg` include full memory barriers (like x86 `lock`) to simplify lock-free programming |
+| 4-level page table | Compatible with Linux kernel's page table walker; 48-bit virtual, 52-bit physical addresses |
+| CSR-based system control | Unified CSR space for ERR, MODE, CR3, FSR, PMC, etc.; accessed via `rdmsr`/`wrmsr` |
 
+---
 
-2. **Disassembly table** — byte-stream to mnemonic mapping;
-3. **GNU Binutils `.md` file** (opcodes description for `gas` port);
-4. **QEMU target description framework** (for full-system emulation).
+## Appendix C: Deliverables (Toolchain)
+
+1. **ISA specification** (this document)
+2. **Assembler** (`assembler.py`) — assembly to binary
+3. **Simulator** (`simulator.py`) — behavioral emulation
+4. **GNU Binutils `.md` file** (opcodes description for `gas` port) — pending
+5. **QEMU target description framework** (for full-system emulation) — pending

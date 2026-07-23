@@ -1,6 +1,6 @@
 # MacroCore-X Fibonacci Sequence
 # Computes first 10 Fibonacci numbers and stores them at memory 0x2000
-# Uses R1-R15 only (4-bit register fields)
+# Uses 5-bit register fields (R0-R31)
 
     # R1 = counter (10 iterations)
     mov r1, 10
@@ -27,22 +27,21 @@
 fib_loop:
     # Compute next Fibonacci: R7 = R3 + R4
     mov r7, 0
-    add r7, r3
-    add r7, r4
+    add r7, r7, r3
+    add r7, r7, r4
 
     # Store result at [r2 + r6]
     # Compute address: R8 = R2 + R6
     mov r8, 0
-    add r8, r2
-    add r8, r6
+    add r8, r8, r2
+    add r8, r8, r6
     st r7, [r8 + 0]
 
     # Shift for next: R3 = R4, R4 = R7
-    # Use xor to zero, then add
-    xor r3, r3
-    add r3, r4
-    xor r4, r4
-    add r4, r7
+    xor r3, r3, r3
+    add r3, r3, r4
+    xor r4, r4, r4
+    add r4, r4, r7
 
     # Increment counter and offset
     addi r5, r5, 1

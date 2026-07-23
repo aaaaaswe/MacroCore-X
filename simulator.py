@@ -123,18 +123,18 @@ C_MNEMONICS = {
 }
 
 SYS2_MNEMONICS = {
-    0xA0: 'syscall', 0xA1: 'sysret', 0xA2: 'int', 0xA3: 'iret',
-    0xA6: 'cpuid', 0xA7: 'hlt', 0xA8: 'cli', 0xA9: 'sti',
-    0xAA: 'nop', 0xAB: 'ecall',
+    0xB0: 'syscall', 0xB1: 'sysret', 0xB2: 'int', 0xB3: 'iret',
+    0xB6: 'cpuid', 0xB7: 'hlt', 0xB8: 'cli', 0xB9: 'sti',
+    0xBA: 'nop', 0xBB: 'ecall', 0xBC: 'fence', 0xBD: 'bkpt',
 }
 
-SYS4_MNEMONICS = {0xA4: 'rdmsr', 0xA5: 'wrmsr'}
+SYS4_MNEMONICS = {0xB4: 'rdmsr', 0xB5: 'wrmsr'}
 
 
 def get_inst_length(cpu: CPU, opcode: int, pc: int) -> int:
     """Determine instruction length from opcode byte."""
-    if opcode <= 0x12:
-        return 2  # R-type
+    if opcode <= 0x1F:
+        return 4  # R-type (4 bytes)
     if opcode == 0x2A:  # movi (6-byte I-type)
         return 6
     if 0x20 <= opcode <= 0x29:
@@ -152,13 +152,13 @@ def get_inst_length(cpu: CPU, opcode: int, pc: int) -> int:
             if funct == 0x0B:  # vfmadd
                 return 8
         return 6
-    if (opcode & 0xF0) == 0x70:
+    if (opcode & 0xF0) == 0xA0:
         return 6  # F-type scalar FP
     if 0x90 <= opcode <= 0x97:
         return 6  # C-type
-    if opcode in (0xA0, 0xA1, 0xA2, 0xA3, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB):
+    if opcode in (0xB0, 0xB1, 0xB2, 0xB3, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD):
         return 2  # System 2-byte
-    if opcode in (0xA4, 0xA5):
+    if opcode in (0xB4, 0xB5):
         return 4  # System 4-byte
     return 2  # default
 
@@ -168,32 +168,38 @@ def disassemble_one(cpu: CPU, pc: int) -> Tuple[str, int]:
     opcode = cpu.read_byte(pc)
     length = get_inst_length(cpu, opcode, pc)
 
-    if opcode <= 0x12:
-        # R-type
-        rs1 = (cpu.read_byte(pc + 1) >> 4) & 0xF
-        rs2 = cpu.read_byte(pc + 1) & 0xF
+    if opcode <= 0x1F:
+        # R-type: 4-byte, byte0=opcode, byte1=(Rd<<3)|(Rs1>>2), byte2=((Rs1&3)<<6)|(Rs2<<1)|X, byte3=0
+        byte1 = cpu.read_byte(pc + 1)
+        byte2 = cpu.read_byte(pc + 2)
+        rd = (byte1 >> 3) & 0x1F
+        rs1 = ((byte1 & 0x7) << 2) | ((byte2 >> 6) & 0x3)
+        rs2 = (byte2 >> 1) & 0x1F
         mnem = R_MNEMONICS.get(opcode, f'???')
         if opcode == 0x12:  # clz
-            return f"{mnem} r{rs1}", length
-        return f"{mnem} r{rs1}, r{rs2}", length
+            return f"{mnem} r{rd}, r{rs1}", length
+        return f"{mnem} r{rd}, r{rs1}, r{rs2}", length
 
     elif 0x20 <= opcode <= 0x29:
-        # I-type 4-byte: byte0=opcode, byte1=(rd<<4)|rs1, byte2-3=imm16
+        # I-type 4-byte: byte0=opcode, byte1=[Rd 5 bits][Rs1[4:2] 3 bits], byte2=[Rs1[1:0] 2 bits][IMM[13:8] 6 bits], byte3=IMM[7:0]
         byte1 = cpu.read_byte(pc + 1)
-        rd = (byte1 >> 4) & 0xF
-        rs1 = byte1 & 0xF
-        imm = cpu.read_i16(pc + 2)
+        byte2 = cpu.read_byte(pc + 2)
+        byte3 = cpu.read_byte(pc + 3)
+        rd = (byte1 >> 3) & 0x1F
+        rs1 = ((byte1 & 0x7) << 2) | ((byte2 >> 6) & 0x3)
+        imm = (((byte2 & 0x3F) << 8) | byte3)  # 14-bit unsigned
+        imm = sign_extend_64(imm, 14)
         mnem = I_MNEMONICS.get(opcode, f'???')
         if mnem in ('shli', 'shri', 'sari'):
-            return f"{mnem} r{rd}, r{rs1}, {imm & 0x1F}", length
+            return f"{mnem} r{rd}, r{rs1}, {imm & 0x3F}", length
         if mnem == 'mov':
             return f"{mnem} r{rd}, {imm}", length
         return f"{mnem} r{rd}, r{rs1}, {imm}", length
 
     elif opcode == 0x2A:
-        # movi (6-byte): byte0=0x2A, byte1=(rd<<4)|0, byte2-5=imm32
+        # movi (6-byte): byte0=0x2A, byte1=[Rd 5 bits][000], byte2-5=imm32 LE
         byte1 = cpu.read_byte(pc + 1)
-        rd = (byte1 >> 4) & 0xF
+        rd = (byte1 >> 3) & 0x1F
         imm = cpu.read_u32(pc + 2)
         return f"movi r{rd}, 0x{imm:x}", length
 
@@ -283,7 +289,7 @@ def disassemble_one(cpu: CPU, pc: int) -> Tuple[str, int]:
             return f"{mnem} v{vd}, v{vs1}, v{vs2}, v{vs3}", length
         return f"{mnem} v{vd}, v{vs1}, v{vs2}", length
 
-    elif (opcode & 0xF0) == 0x70:
+    elif (opcode & 0xF0) == 0xA0:
         # F-type scalar FP
         byte1 = cpu.read_byte(pc + 1)
         fd = opcode & 0xF
@@ -324,15 +330,19 @@ def disassemble_one(cpu: CPU, pc: int) -> Tuple[str, int]:
             return "leave", length
         return f"{mnem}", length
 
-    elif opcode in (0xA0, 0xA1, 0xA2, 0xA3, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB):
+    elif opcode in (0xB0, 0xB1, 0xB2, 0xB3, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD):
         # System 2-byte
         mnem = SYS2_MNEMONICS.get(opcode, f'???')
         imm8 = cpu.read_byte(pc + 1)
-        if mnem in ('syscall', 'int', 'ecall'):
+        if mnem in ('syscall', 'int', 'ecall', 'bkpt'):
             return f"{mnem} {imm8}", length
+        if mnem == 'fence':
+            pi = (imm8 >> 4) & 0xF
+            po = imm8 & 0xF
+            return f"{mnem} 0x{pi:x}, 0x{po:x}", length
         return mnem, length
 
-    elif opcode in (0xA4, 0xA5):
+    elif opcode in (0xB4, 0xB5):
         # System 4-byte
         mnem = SYS4_MNEMONICS.get(opcode, f'???')
         byte1 = cpu.read_byte(pc + 1)
@@ -504,32 +514,34 @@ def execute_one(cpu: CPU, trace: bool = False) -> bool:
         disasm, _ = disassemble_one(cpu, pc)
         print(f"  [{cpu.steps:6d}] 0x{pc:04x}: {disasm}")
 
-    # ---- R-type ----
-    if opcode <= 0x12:
+    # ---- R-type (4 bytes) ----
+    if opcode <= 0x1F:
         byte1 = cpu.read_byte(pc + 1)
-        rs1 = (byte1 >> 4) & 0xF
-        rs2 = byte1 & 0xF
+        byte2 = cpu.read_byte(pc + 2)
+        rd = (byte1 >> 3) & 0x1F
+        rs1 = ((byte1 & 0x7) << 2) | ((byte2 >> 6) & 0x3)
+        rs2 = (byte2 >> 1) & 0x1F
         val1 = cpu.r[rs1]
         val2 = cpu.r[rs2]
 
         if opcode == 0x00:  # add
             result = (val1 + val2) & 0xFFFFFFFFFFFFFFFF
             set_flags_arith(cpu, result, val1, val2)
-            cpu.r[rs1] = result
+            cpu.r[rd] = result
         elif opcode == 0x01:  # sub
             result = (val1 - val2) & 0xFFFFFFFFFFFFFFFF
             set_flags_arith(cpu, result, val1, val2, True)
-            cpu.r[rs1] = result
+            cpu.r[rd] = result
         elif opcode == 0x02:  # mul
             result = (val1 * val2) & 0xFFFFFFFFFFFFFFFF
             set_flags_arith(cpu, result, val1, val2)
-            cpu.r[rs1] = result
+            cpu.r[rd] = result
         elif opcode == 0x03:  # div
             if val2 == 0:
                 raise_exception(cpu, 0x00)
                 return True
             result = (val1 // val2) & 0xFFFFFFFFFFFFFFFF  # signed
-            cpu.r[rs1] = result
+            cpu.r[rd] = result
             cpu.zf = 1 if result == 0 else 0
             cpu.sf = 1 if (result >> 63) & 1 else 0
         elif opcode == 0x04:  # divu
@@ -537,69 +549,68 @@ def execute_one(cpu: CPU, trace: bool = False) -> bool:
                 raise_exception(cpu, 0x00)
                 return True
             result = (val1 % 0x10000000000000000) // (val2 % 0x10000000000000000)
-            cpu.r[rs1] = result
+            cpu.r[rd] = result
             cpu.zf = 1 if result == 0 else 0
             cpu.sf = 1 if (result >> 63) & 1 else 0
         elif opcode == 0x05:  # and
             result = val1 & val2
             set_flags_logical(cpu, result)
-            cpu.r[rs1] = result
+            cpu.r[rd] = result
         elif opcode == 0x06:  # or
             result = val1 | val2
             set_flags_logical(cpu, result)
-            cpu.r[rs1] = result
+            cpu.r[rd] = result
         elif opcode == 0x07:  # xor
             result = val1 ^ val2
             set_flags_logical(cpu, result)
-            cpu.r[rs1] = result
+            cpu.r[rd] = result
         elif opcode == 0x08:  # shl
             shift = val2 & 0x3F
             result = (val1 << shift) & 0xFFFFFFFFFFFFFFFF
             set_flags_logical(cpu, result)
-            cpu.r[rs1] = result
+            cpu.r[rd] = result
         elif opcode == 0x09:  # shr
             shift = val2 & 0x3F
             result = val1 >> shift
             set_flags_logical(cpu, result)
-            cpu.r[rs1] = result
+            cpu.r[rd] = result
         elif opcode == 0x0A:  # sar
             shift = val2 & 0x3F
             result = (val1 & 0xFFFFFFFFFFFFFFFF) >> shift
             if val1 & 0x8000000000000000:
                 result |= ((-1 << (64 - shift)) & 0xFFFFFFFFFFFFFFFF)
             set_flags_logical(cpu, result)
-            cpu.r[rs1] = result
+            cpu.r[rd] = result
         elif opcode == 0x0B:  # eq
-            cpu.r[rs1] = 1 if val1 == val2 else 0
-            cpu.zf = 1 if cpu.r[rs1] == 0 else 0
+            cpu.r[rd] = 1 if val1 == val2 else 0
+            cpu.zf = 1 if cpu.r[rd] == 0 else 0
         elif opcode == 0x0C:  # lt
-            cpu.r[rs1] = 1 if (val1 & 0xFFFFFFFFFFFFFFFF) < (val2 & 0xFFFFFFFFFFFFFFFF) else 0  # signed comparison
             # Actually need signed comparison
             s1 = val1 if (val1 >> 63) == 0 else val1 - 0x10000000000000000
             s2 = val2 if (val2 >> 63) == 0 else val2 - 0x10000000000000000
-            cpu.r[rs1] = 1 if s1 < s2 else 0
-            cpu.zf = 1 if cpu.r[rs1] == 0 else 0
+            cpu.r[rd] = 1 if s1 < s2 else 0
+            cpu.zf = 1 if cpu.r[rd] == 0 else 0
         elif opcode == 0x0D:  # ltu
-            cpu.r[rs1] = 1 if val1 < val2 else 0
-            cpu.zf = 1 if cpu.r[rs1] == 0 else 0
+            cpu.r[rd] = 1 if val1 < val2 else 0
+            cpu.zf = 1 if cpu.r[rd] == 0 else 0
         elif opcode == 0x0E:  # max
             s1 = val1 if (val1 >> 63) == 0 else val1 - 0x10000000000000000
             s2 = val2 if (val2 >> 63) == 0 else val2 - 0x10000000000000000
-            cpu.r[rs1] = val1 if s1 > s2 else val2
+            cpu.r[rd] = val1 if s1 > s2 else val2
         elif opcode == 0x0F:  # min
             s1 = val1 if (val1 >> 63) == 0 else val1 - 0x10000000000000000
             s2 = val2 if (val2 >> 63) == 0 else val2 - 0x10000000000000000
-            cpu.r[rs1] = val1 if s1 < s2 else val2
+            cpu.r[rd] = val1 if s1 < s2 else val2
         elif opcode == 0x10:  # ror
             shift = val2 & 0x3F
             result = ((val1 >> shift) | (val1 << (64 - shift))) & 0xFFFFFFFFFFFFFFFF
             set_flags_logical(cpu, result)
-            cpu.r[rs1] = result
+            cpu.r[rd] = result
         elif opcode == 0x11:  # rol
             shift = val2 & 0x3F
             result = ((val1 << shift) | (val1 >> (64 - shift))) & 0xFFFFFFFFFFFFFFFF
             set_flags_logical(cpu, result)
-            cpu.r[rs1] = result
+            cpu.r[rd] = result
         elif opcode == 0x12:  # clz
             result = 0
             v = val1
@@ -607,19 +618,22 @@ def execute_one(cpu: CPU, trace: bool = False) -> bool:
                 if (v >> i) & 1:
                     break
                 result += 1
-            cpu.r[rs1] = result
+            cpu.r[rd] = result
 
         cpu.pc += length
         cpu.r[0] = 0  # R0 is hardwired to zero
         cpu.steps += 1
         return True
 
-    # ---- I-type ----
+    # ---- I-type (4 bytes) ----
     if 0x20 <= opcode <= 0x29:
         byte1 = cpu.read_byte(pc + 1)
-        rd = (byte1 >> 4) & 0xF
-        rs1 = byte1 & 0xF
-        imm = cpu.read_i16(pc + 2)
+        byte2 = cpu.read_byte(pc + 2)
+        byte3 = cpu.read_byte(pc + 3)
+        rd = (byte1 >> 3) & 0x1F
+        rs1 = ((byte1 & 0x7) << 2) | ((byte2 >> 6) & 0x3)
+        imm = (((byte2 & 0x3F) << 8) | byte3)
+        imm = sign_extend_64(imm, 14)
 
         if opcode == 0x20:  # addi
             result = (cpu.r[rs1] + imm) & 0xFFFFFFFFFFFFFFFF
@@ -646,22 +660,22 @@ def execute_one(cpu: CPU, trace: bool = False) -> bool:
             set_flags_logical(cpu, result)
             cpu.r[rd] = result
         elif opcode == 0x26:  # shli
-            result = (cpu.r[rs1] << (imm & 0x1F)) & 0xFFFFFFFFFFFFFFFF
+            result = (cpu.r[rs1] << (imm & 0x3F)) & 0xFFFFFFFFFFFFFFFF
             set_flags_logical(cpu, result)
             cpu.r[rd] = result
         elif opcode == 0x27:  # shri
-            result = cpu.r[rs1] >> (imm & 0x1F)
+            result = cpu.r[rs1] >> (imm & 0x3F)
             set_flags_logical(cpu, result)
             cpu.r[rd] = result
         elif opcode == 0x28:  # sari
-            shift = imm & 0x1F
+            shift = imm & 0x3F
             result = cpu.r[rs1] >> shift
             if cpu.r[rs1] & 0x8000000000000000:
                 result |= ((-1 << (64 - shift)) & 0xFFFFFFFFFFFFFFFF)
             set_flags_logical(cpu, result)
             cpu.r[rd] = result
         elif opcode == 0x29:  # mov
-            cpu.r[rd] = sign_extend_64(imm, 16)
+            cpu.r[rd] = sign_extend_64(imm, 14)
             set_flags_logical(cpu, cpu.r[rd])
 
         cpu.pc += length
@@ -672,7 +686,7 @@ def execute_one(cpu: CPU, trace: bool = False) -> bool:
     # ---- movi (6-byte) ----
     if opcode == 0x2A:
         byte1 = cpu.read_byte(pc + 1)
-        rd = (byte1 >> 4) & 0xF
+        rd = (byte1 >> 3) & 0x1F
         imm = cpu.read_u32(pc + 2)
         cpu.r[rd] = imm
         set_flags_logical(cpu, imm)
@@ -876,7 +890,7 @@ def execute_one(cpu: CPU, trace: bool = False) -> bool:
         return True
 
     # ---- F-type (Scalar FP) ----
-    if (opcode & 0xF0) == 0x70:
+    if (opcode & 0xF0) == 0xA0:
         byte1 = cpu.read_byte(pc + 1)
         fd = opcode & 0xF
         fs1 = (byte1 >> 4) & 0xF
@@ -955,44 +969,54 @@ def execute_one(cpu: CPU, trace: bool = False) -> bool:
         return True
 
     # ---- System 2-byte ----
-    if opcode in (0xA0, 0xA1, 0xA2, 0xA3, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB):
+    if opcode in (0xB0, 0xB1, 0xB2, 0xB3, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD):
         imm8 = cpu.read_byte(pc + 1)
 
-        if opcode == 0xA0:  # syscall
+        if opcode == 0xB0:  # syscall
             syscall_handler(cpu, imm8)
             if cpu.halted:
                 cpu.pc += length
                 cpu.r[0] = 0
                 cpu.steps += 1
                 return False
-        elif opcode == 0xA1:  # sysret
+        elif opcode == 0xB1:  # sysret
             cpu.priv = 1
             cpu.pc = cpu.err
-        elif opcode == 0xA2:  # int
+        elif opcode == 0xB2:  # int
             raise_exception(cpu, imm8)
-        elif opcode == 0xA3:  # iret
+        elif opcode == 0xB3:  # iret
             cpu.pc = cpu.err
             cpu.priv = 1
-        elif opcode == 0xA6:  # cpuid
+        elif opcode == 0xB6:  # cpuid
             cpu.r[0] = 0x4D43584D  # "MCXM"
             cpu.r[1] = 0x00020000  # version 2.0
             cpu.r[2] = 0x00000000  # features
             cpu.r[3] = 0x00000001  # cache info
-        elif opcode == 0xA7:  # hlt
+        elif opcode == 0xB7:  # hlt
             cpu.halted = True
             cpu.pc += length
             cpu.r[0] = 0
             cpu.steps += 1
             return False
-        elif opcode == 0xA8:  # cli
+        elif opcode == 0xB8:  # cli
             cpu.iflag = 0
-        elif opcode == 0xA9:  # sti
+        elif opcode == 0xB9:  # sti
             cpu.iflag = 1
-        elif opcode == 0xAA:  # nop
+        elif opcode == 0xBA:  # nop
             pass
-        elif opcode == 0xAB:  # ecall
+        elif opcode == 0xBB:  # ecall
             # Environment call - used as exit in our simulator
             print(f"\n[ecall] exit code: {imm8}")
+            cpu.pc += length
+            cpu.r[0] = 0
+            cpu.steps += 1
+            return False
+        elif opcode == 0xBC:  # fence
+            # Memory fence — no-op in single-core simulator
+            pass
+        elif opcode == 0xBD:  # bkpt
+            # Hardware breakpoint — halt or enter debug mode
+            print(f"\n[bkpt] breakpoint {imm8} at PC=0x{cpu.pc:x}")
             cpu.pc += length
             cpu.r[0] = 0
             cpu.steps += 1
@@ -1004,7 +1028,7 @@ def execute_one(cpu: CPU, trace: bool = False) -> bool:
         return True
 
     # ---- System 4-byte ----
-    if opcode in (0xA4, 0xA5):
+    if opcode in (0xB4, 0xB5):
         byte1 = cpu.read_byte(pc + 1)
         rs1 = (byte1 >> 4) & 0xF
         imm_hi = byte1 & 0xF

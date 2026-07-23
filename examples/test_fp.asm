@@ -1,6 +1,6 @@
 # MacroCore-X Scalar FP Test (F-type Extension)
 # Tests fadd, fsub, fmul, fdiv (f32 precision)
-# F-type encoding: byte0=0x70|Fd, byte1=(Fs1<<4)|Fs2, byte2=funct, byte3=aux
+# F-type encoding: byte0=0xA0|Fd, byte1=(Fs1<<4)|Fs2, byte2=funct, byte3=aux
 
     # R2 = buffer address for float data
     movi r2, 0x8000
