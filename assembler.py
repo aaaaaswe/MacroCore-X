@@ -237,7 +237,7 @@ def parse_imm(s: str) -> int:
         val = int(s, 16)
     else:
         val = int(s)
-    return val & 0xFFFFFFFFFFFFFFFF  # 64-bit mask
+    return val
 
 def sext(val: int, bits: int) -> int:
     """Sign-extend value to 64 bits"""
@@ -359,6 +359,12 @@ class Assembler:
                 self.output[patch_offset] = (imm20 >> 16) & 0xFF
                 self.output[patch_offset + 1] = (imm20 >> 8) & 0xFF
                 self.output[patch_offset + 2] = imm20 & 0xFF
+            elif inst_type == 'la_movi':
+                # la → movi: patch 32-bit absolute address at byte2-5
+                self.output[patch_offset] = (target >> 0) & 0xFF
+                self.output[patch_offset + 1] = (target >> 8) & 0xFF
+                self.output[patch_offset + 2] = (target >> 16) & 0xFF
+                self.output[patch_offset + 3] = (target >> 24) & 0xFF
 
         return bytes(self.output)
 
@@ -433,13 +439,20 @@ class Assembler:
 
         if mnemonic in ('shli', 'shri', 'sari'):
             rs1 = parse_reg(ops[1])
-            imm = parse_imm(ops[2]) & 0x3F  # 6-bit shift amount
+            imm = parse_imm(ops[2])
+            if not (0 <= imm <= 63):
+                raise ValueError(f"Shift amount must be 0-63, got {imm}")
+            imm = imm & 0x3F  # 6-bit shift amount
         elif mnemonic == 'mov':
             rs1 = 0  # unused
             imm = parse_imm(ops[1])
+            if not (-8192 <= imm <= 8191):
+                raise ValueError(f"mov immediate must be -8192..8191 (14-bit signed), got {imm}")
         else:
             rs1 = parse_reg(ops[1])
             imm = parse_imm(ops[2])
+            if not (-8192 <= imm <= 8191):
+                raise ValueError(f"{mnemonic} immediate must be -8192..8191 (14-bit signed), got {imm}")
 
         # byte0 = opcode
         self.output.append(opcode)
@@ -789,17 +802,31 @@ class Assembler:
     def _emit_li(self, ops):
         rd = parse_reg(ops[0])
         imm = parse_imm(ops[1])
-        if -32768 <= imm <= 32767:
+        if -8192 <= imm <= 8191:
             self._emit_i('mov', [ops[0], ops[1]])
         else:
             self._emit_movi(rd, imm)
 
     def _emit_la(self, ops, inst):
-        # la Rd, label → lda Rd, PC, 0, 1
-        # This is a simplified version; label resolution would need a real linker
+        # la Rd, label → movi Rd, label_addr
+        # If label not yet defined, emit placeholder and patch in Pass 2
         rd = parse_reg(ops[0])
-        target = parse_imm(ops[1])
-        self._emit_l4('lda', [ops[0], 'r0', 'r0', '1'])
+        target_str = ops[1]
+
+        if target_str.startswith('0x') or target_str.lstrip('-').isdigit():
+            # Immediate value
+            target = parse_imm(target_str)
+            self._emit_movi(rd, target)
+        else:
+            # Label reference — emit placeholder and defer
+            self.output.append(0x2A)  # movi opcode
+            self.output.append(((rd & 0x1F) << 3) | 0)  # Rd[4:0] + reserved
+            self.output.append(0)  # placeholder byte2
+            self.output.append(0)  # placeholder byte3
+            self.output.append(0)  # placeholder byte4
+            self.output.append(0)  # placeholder byte5
+            self.pending.append((target_str, self.offset + 2, 'la_movi'))  # patch at byte2
+            self.offset += 6
 
 
 # =============================================================================

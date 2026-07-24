@@ -161,7 +161,7 @@ class CPU:
             raw = int.from_bytes(self.mem[paddr:paddr+8], 'little', signed=False)
             flags = raw & 0xFF
             return (flags, raw)
-        except:
+        except Exception:
             return None
 
     def _write_pte(self, paddr: int, pte: tuple):
@@ -170,7 +170,7 @@ class CPU:
         new_raw = (raw & ~0xFF) | (flags & 0xFF)
         try:
             self.mem[paddr:paddr+8] = new_raw.to_bytes(8, 'little', signed=False)
-        except:
+        except Exception:
             pass
 
     def translate(self, vaddr: int, is_write: bool = False) -> int:
@@ -200,7 +200,7 @@ class CPU:
         paddr = self.translate(addr, is_write=False)
         if paddr < 0:
             raise Exception(f"MMU page fault at virtual address 0x{addr:x}")
-        if paddr < 0 or paddr + size > self.mem_size:
+        if paddr + size > self.mem_size:
             raise Exception(f"Memory access out of bounds: va=0x{addr:x} pa=0x{paddr:x}")
         data = int.from_bytes(self.mem[paddr:paddr+size], 'little', signed=signed)
         return data
@@ -210,7 +210,7 @@ class CPU:
         paddr = self.translate(addr, is_write=True)
         if paddr < 0:
             raise Exception(f"MMU page fault at virtual address 0x{addr:x}")
-        if paddr < 0 or paddr + size > self.mem_size:
+        if paddr + size > self.mem_size:
             raise Exception(f"Memory access out of bounds: va=0x{addr:x} pa=0x{paddr:x}")
         self.mem[paddr:paddr+size] = value.to_bytes(size, 'little', signed=False)
 
@@ -544,11 +544,13 @@ def set_flags_arith(cpu: CPU, result: int, op1: int, op2: int, is_sub: bool = Fa
     result = result & 0xFFFFFFFFFFFFFFFF
     cpu.zf = 1 if result == 0 else 0
     cpu.sf = 1 if (result >> 63) & 1 else 0
-    # Carry flag
+    # Carry flag — mask to 64-bit unsigned before comparison
+    uop1 = op1 & 0xFFFFFFFFFFFFFFFF
+    uop2 = op2 & 0xFFFFFFFFFFFFFFFF
     if is_sub:
-        cpu.cf = 1 if op1 < op2 else 0
+        cpu.cf = 1 if uop1 < uop2 else 0
     else:
-        cpu.cf = 1 if (op1 + op2) > 0xFFFFFFFFFFFFFFFF else 0
+        cpu.cf = 1 if (uop1 + uop2) > 0xFFFFFFFFFFFFFFFF else 0
     # Overflow flag
     if is_sub:
         cpu.of = 1 if ((op1 ^ op2) & (op1 ^ result) & 0x8000000000000000) else 0
@@ -590,54 +592,33 @@ def fp_execute_f(cpu: CPU, fd: int, fs1: int, fs2: int, funct: int, aux: int):
     prec: bits [2:1] — 0=f32, 1=f64
     """
     is_f64 = ((aux >> 1) & 0x3) == 1
-    if is_f64:
-        a = int_to_f64(cpu.f[fs1])
-        b = int_to_f64(cpu.f[fs2]) if funct not in (0x04, 0x06, 0x07) else 0.0
-        if funct == 0x00:  # fadd
-            result = a + b
-        elif funct == 0x01:  # fsub
-            result = a - b
-        elif funct == 0x02:  # fmul
-            result = a * b
-        elif funct == 0x03:  # fdiv
-            result = a / b if b != 0.0 else float('inf')
-        elif funct == 0x04:  # fsqrt
-            result = a ** 0.5 if a >= 0.0 else float('nan')
-        elif funct == 0x06:  # fcvt.w.s (float→int)
-            result = float(int(a))  # truncate toward zero
-        elif funct == 0x07:  # fcvt.s.w (int→float)
-            result = float(a)
-        elif funct == 0x08:  # fmin
-            result = a if a < b else b
-        elif funct == 0x09:  # fmax
-            result = a if a > b else b
-        else:
-            result = 0.0
-        cpu.f[fd] = f64_to_int(result)
+    to_float = int_to_f64 if is_f64 else int_to_f32
+    to_int = f64_to_int if is_f64 else f32_to_int
+
+    a = to_float(cpu.f[fs1])
+    b = to_float(cpu.f[fs2]) if funct not in (0x04, 0x06, 0x07) else 0.0
+
+    if funct == 0x00:  # fadd
+        result = a + b
+    elif funct == 0x01:  # fsub
+        result = a - b
+    elif funct == 0x02:  # fmul
+        result = a * b
+    elif funct == 0x03:  # fdiv
+        result = a / b if b != 0.0 else float('inf')
+    elif funct == 0x04:  # fsqrt
+        result = a ** 0.5 if a >= 0.0 else float('nan')
+    elif funct == 0x06:  # fcvt.w.s (float→int)
+        result = float(int(a))  # truncate toward zero
+    elif funct == 0x07:  # fcvt.s.w (int→float)
+        result = float(a)
+    elif funct == 0x08:  # fmin
+        result = a if a < b else b
+    elif funct == 0x09:  # fmax
+        result = a if a > b else b
     else:
-        a = int_to_f32(cpu.f[fs1])
-        b = int_to_f32(cpu.f[fs2]) if funct not in (0x04, 0x06, 0x07) else 0.0
-        if funct == 0x00:  # fadd
-            result = a + b
-        elif funct == 0x01:  # fsub
-            result = a - b
-        elif funct == 0x02:  # fmul
-            result = a * b
-        elif funct == 0x03:  # fdiv
-            result = a / b if b != 0.0 else float('inf')
-        elif funct == 0x04:  # fsqrt
-            result = a ** 0.5 if a >= 0.0 else float('nan')
-        elif funct == 0x06:  # fcvt.w.s (float→int)
-            result = float(int(a))
-        elif funct == 0x07:  # fcvt.s.w (int→float)
-            result = float(a)
-        elif funct == 0x08:  # fmin
-            result = a if a < b else b
-        elif funct == 0x09:  # fmax
-            result = a if a > b else b
-        else:
-            result = 0.0
-        cpu.f[fd] = f32_to_int(result)
+        result = 0.0
+    cpu.f[fd] = to_int(result)
 
 
 def fp_compare(cpu: CPU, fs1: int, fs2: int, aux: int):
@@ -757,21 +738,20 @@ def execute_one(cpu: CPU, trace: bool = False) -> bool:
             cpu.r[rd] = 1 if val1 == val2 else 0
             cpu.zf = 1 if cpu.r[rd] == 0 else 0
         elif opcode == 0x0C:  # lt
-            # Actually need signed comparison
-            s1 = val1 if (val1 >> 63) == 0 else val1 - 0x10000000000000000
-            s2 = val2 if (val2 >> 63) == 0 else val2 - 0x10000000000000000
+            s1 = sign_extend_64(val1, 64)
+            s2 = sign_extend_64(val2, 64)
             cpu.r[rd] = 1 if s1 < s2 else 0
             cpu.zf = 1 if cpu.r[rd] == 0 else 0
         elif opcode == 0x0D:  # ltu
             cpu.r[rd] = 1 if val1 < val2 else 0
             cpu.zf = 1 if cpu.r[rd] == 0 else 0
         elif opcode == 0x0E:  # max
-            s1 = val1 if (val1 >> 63) == 0 else val1 - 0x10000000000000000
-            s2 = val2 if (val2 >> 63) == 0 else val2 - 0x10000000000000000
+            s1 = sign_extend_64(val1, 64)
+            s2 = sign_extend_64(val2, 64)
             cpu.r[rd] = val1 if s1 > s2 else val2
         elif opcode == 0x0F:  # min
-            s1 = val1 if (val1 >> 63) == 0 else val1 - 0x10000000000000000
-            s2 = val2 if (val2 >> 63) == 0 else val2 - 0x10000000000000000
+            s1 = sign_extend_64(val1, 64)
+            s2 = sign_extend_64(val2, 64)
             cpu.r[rd] = val1 if s1 < s2 else val2
         elif opcode == 0x10:  # ror
             shift = val2 & 0x3F
@@ -987,20 +967,20 @@ def execute_one(cpu: CPU, trace: bool = False) -> bool:
         elif opcode == 0x64:  # bne
             taken = v1 != v2
         elif opcode == 0x65:  # blt
-            s1 = v1 if (v1 >> 63) == 0 else v1 - 0x10000000000000000
-            s2 = v2 if (v2 >> 63) == 0 else v2 - 0x10000000000000000
+            s1 = sign_extend_64(v1, 64)
+            s2 = sign_extend_64(v2, 64)
             taken = s1 < s2
         elif opcode == 0x66:  # ble
-            s1 = v1 if (v1 >> 63) == 0 else v1 - 0x10000000000000000
-            s2 = v2 if (v2 >> 63) == 0 else v2 - 0x10000000000000000
+            s1 = sign_extend_64(v1, 64)
+            s2 = sign_extend_64(v2, 64)
             taken = s1 <= s2
         elif opcode == 0x67:  # bgt
-            s1 = v1 if (v1 >> 63) == 0 else v1 - 0x10000000000000000
-            s2 = v2 if (v2 >> 63) == 0 else v2 - 0x10000000000000000
+            s1 = sign_extend_64(v1, 64)
+            s2 = sign_extend_64(v2, 64)
             taken = s1 > s2
         elif opcode == 0x68:  # bge
-            s1 = v1 if (v1 >> 63) == 0 else v1 - 0x10000000000000000
-            s2 = v2 if (v2 >> 63) == 0 else v2 - 0x10000000000000000
+            s1 = sign_extend_64(v1, 64)
+            s2 = sign_extend_64(v2, 64)
             taken = s1 >= s2
         elif opcode == 0x69:  # bltu
             taken = v1 < v2

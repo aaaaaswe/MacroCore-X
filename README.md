@@ -22,6 +22,9 @@ This repository contains the ISA specification and related documentation.
 |------|-------------|
 | `isa-v1.0.md` | MacroCore-X ISA v1.0 specification (English, official) |
 | `isa-v1.0ch.md` | MacroCore-X ISA v1.0 specification (Chinese reference translation) |
+| `assembler.py` | Python assembler for MacroCore-X assembly to binary |
+| `simulator.py` | Python behavioral simulator / emulator |
+| `examples/` | Example assembly programs (ALU, FP, Fibonacci, MMU) |
 | `LICENSE` | Creative Commons Attribution 4.0 International License |
 
 ---
@@ -53,7 +56,7 @@ See the full license text in the [`LICENSE`](LICENSE) file or at:
 
 ## Status
 
-**MacroCore-X v2.0** — Modular ISA with mandatory core and optional extensions.
+**MacroCore-X v1.0** — Modular ISA with mandatory core and optional extensions.
 
 ## Architecture
 
@@ -81,8 +84,12 @@ See the full license text in the [`LICENSE`](LICENSE) file or at:
 ## ✅ Simulator / Emulator
 - Behavioral simulator in Python (`simulator.py`): executes MacroCore-X binary programs
 - Full register file (R0-R31) with R0 hardwired to zero
+- Independent FPU register file (F0-F31, 64-bit)
+- Vector register file (V0-V31, 256-bit)
 - Memory model with configurable size
+- MMU with 4-level page table, 16-entry TLB, user/kernel mode
 - Flag register (CF, ZF, SF, OF)
+- CSR support (CR3, MODE, IVEC)
 - System call support (exit, write, print integer)
 - Disassembly trace mode (`-d` flag)
 - Max step limit (`-s N` flag)
@@ -92,6 +99,7 @@ See the full license text in the [`LICENSE`](LICENSE) file or at:
 - `examples/test_alu.asm`: Tests arithmetic, logical, shift, and comparison operations
 - `examples/fibonacci.asm`: Computes first 10 Fibonacci numbers and stores them in memory
 - `examples/test_fp.asm`: Tests scalar FP operations (fadd, fsub, fmul, fdiv, fcmp)
+- `examples/test_mmu.py`: Tests MMU with identity mapping and user-mode execution
 
 ## 🚀 Quick Start
 ```bash
@@ -142,6 +150,9 @@ For questions or contributions, please open an issue or pull request on this rep
 |------|------|
 | `isa-v1.0.md` | MacroCore-X ISA v1.0 规范（英文，官方版） |
 | `isa-v1.0ch.md` | MacroCore-X ISA v1.0 规范（中文参考翻译） |
+| `assembler.py` | Python 汇编器，将 MacroCore-X 汇编转为二进制 |
+| `simulator.py` | Python 行为级模拟器 / 仿真器 |
+| `examples/` | 示例汇编程序（ALU、FP、Fibonacci、MMU） |
 | `LICENSE` | 知识共享署名 4.0 国际许可证 |
 
 ---
@@ -173,13 +184,13 @@ For questions or contributions, please open an issue or pull request on this rep
 
 ## 状态
 
-**MacroCore-X v1.0** — 初始版本，核心 ISA 稳定，向量扩展占位已预留。
+**MacroCore-X v1.0** — 模块化 ISA，包含强制核心层与可选扩展。
 
-- ✅ 核心整数 ISA（98 条指令）
-- ✅ 数据传输、算术、逻辑、控制转移、系统、标志位、字符串操作
-- ⏳ 向量/SIMD 扩展（设计中）
-- ⏳ 解码器 RTL（计划中）
-- ⏳ 汇编器与工具链（计划中）
+- ✅ 核心整数 ISA（R/I/L/B/C/System 类型）
+- ✅ 标量浮点扩展（F-type，独立 FPU，f32/f64 IEEE 754）
+- ✅ 向量扩展（V-type，预留）
+- ✅ 行为级模拟器（Python）
+- ✅ 汇编器与工具链（Python）
 
 ---
 
