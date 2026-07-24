@@ -484,6 +484,8 @@ class Assembler:
             rs1 = parse_reg(ops[1])
             rs2 = parse_reg(ops[2])
             scale = int(ops[3])
+            if scale not in (1, 2, 4, 8):
+                raise ValueError(f"lda scale must be 1, 2, 4, or 8, got {scale}")
             scale_bits = {1: 0, 2: 1, 4: 2, 8: 3}[scale]
             self.output.append(opcode)
             self.output.append(((rd & 0xF) << 4) | (rs1 & 0xF))

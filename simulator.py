@@ -624,12 +624,9 @@ def fp_execute_f(cpu: CPU, fd: int, fs1: int, fs2: int, funct: int, aux: int):
 def fp_compare(cpu: CPU, fs1: int, fs2: int, aux: int):
     """Execute F-type fcmp: set CPU flags based on float comparison."""
     is_f64 = ((aux >> 1) & 0x3) == 1
-    if is_f64:
-        a = int_to_f64(cpu.f[fs1])
-        b = int_to_f64(cpu.f[fs2])
-    else:
-        a = int_to_f32(cpu.f[fs1])
-        b = int_to_f32(cpu.f[fs2])
+    to_float = int_to_f64 if is_f64 else int_to_f32
+    a = to_float(cpu.f[fs1])
+    b = to_float(cpu.f[fs2])
     cpu.zf = 1 if a == b else 0
     cpu.cf = 1 if a < b else 0
     cpu.sf = 0
@@ -693,7 +690,10 @@ def execute_one(cpu: CPU, trace: bool = False) -> bool:
             if val2 == 0:
                 raise_exception(cpu, 0x00)
                 return True
-            result = (val1 // val2) & 0xFFFFFFFFFFFFFFFF  # signed
+            s1 = sign_extend_64(val1, 64)
+            s2 = sign_extend_64(val2, 64)
+            q = int(s1 / s2)  # truncate toward zero
+            result = q & 0xFFFFFFFFFFFFFFFF
             cpu.r[rd] = result
             cpu.zf = 1 if result == 0 else 0
             cpu.sf = 1 if (result >> 63) & 1 else 0
@@ -701,7 +701,7 @@ def execute_one(cpu: CPU, trace: bool = False) -> bool:
             if val2 == 0:
                 raise_exception(cpu, 0x00)
                 return True
-            result = (val1 % 0x10000000000000000) // (val2 % 0x10000000000000000)
+            result = ((val1 & 0xFFFFFFFFFFFFFFFF) // (val2 & 0xFFFFFFFFFFFFFFFF)) & 0xFFFFFFFFFFFFFFFF
             cpu.r[rd] = result
             cpu.zf = 1 if result == 0 else 0
             cpu.sf = 1 if (result >> 63) & 1 else 0
@@ -800,15 +800,15 @@ def execute_one(cpu: CPU, trace: bool = False) -> bool:
             set_flags_arith(cpu, result, cpu.r[rs1], imm)
             cpu.r[rd] = result
         elif opcode == 0x23:  # andi
-            result = cpu.r[rs1] & (imm & 0xFFFF)
+            result = cpu.r[rs1] & (imm & 0x3FFF)
             set_flags_logical(cpu, result)
             cpu.r[rd] = result
         elif opcode == 0x24:  # ori
-            result = cpu.r[rs1] | (imm & 0xFFFF)
+            result = cpu.r[rs1] | (imm & 0x3FFF)
             set_flags_logical(cpu, result)
             cpu.r[rd] = result
         elif opcode == 0x25:  # xori
-            result = cpu.r[rs1] ^ (imm & 0xFFFF)
+            result = cpu.r[rs1] ^ (imm & 0x3FFF)
             set_flags_logical(cpu, result)
             cpu.r[rd] = result
         elif opcode == 0x26:  # shli

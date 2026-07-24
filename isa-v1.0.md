@@ -1,6 +1,6 @@
-# MacroCore-X v2.0 Instruction Set Architecture Specification
+# MacroCore-X v1.0 Instruction Set Architecture Specification
 
-**Version**: 2.1  
+**Version**: 1.0  
 **Status**: Draft  
 **Target**: General-purpose 64-bit desktop/server processors  
 **Encoding**: Variable-length (2/4/6/8 bytes)  
@@ -104,9 +104,9 @@ Bits:   7..0         7..0         7..0         7..0
         ┌───────────┬───────────┬───────────┬───────────┐
 byte0   │ OP[7:0]               │   Full opcode 0x00–0x1F
         ├───────────┼───────────┼───────────┼───────────┤
-byte1   │ Rd[4:0]       │ Rs1[4:3]      │   Rd (5 bits) + Rs1 high 3 bits
+byte1   │ Rd[4:0]       │ Rs1[4:2]      │   Rd (5 bits) + Rs1 high 3 bits
         ├───────────┼───────────┼───────────┼───────────┤
-byte2   │ Rs1[2:0]      │ Rs2[4:0]      │X│   Rs1 low + Rs2 (5 bits) + X
+byte2   │ Rs1[1:0]  │ Rs2[4:0]      │X│   Rs1 low 2 bits + Rs2 (5 bits) + X
         ├───────────┼───────────┼───────────┼───────────┤
 byte3   │ Reserved (0x00)                       │
         └───────────┴───────────┴───────────┴───────────┘
@@ -117,7 +117,8 @@ byte3   │ Reserved (0x00)                       │
 - **Rs2**: source register 2 (5 bits, 0–31)
 - **X**: extension flag (reserved for future use; must be 0)
 
-Note: For most R-type instructions (except `clz`), Rd = Rs1 (destination = source 1), i.e., the result is written back to the same register as the first source operand. This is an accumulator-style convention for compactness.
+R-type uses an explicit 3-operand format: Rd, Rs1, and Rs2 are all independently specified.
+Encoding: byte0 = full opcode, byte1 = (Rd<<3) | (Rs1>>2), byte2 = ((Rs1&3)<<6) | (Rs2<<1) | X.
 
 #### R-type Instruction List
 
@@ -188,8 +189,8 @@ byte2-5: IMM32 (little-endian, zero-extended)
 
 **Format (4-byte)**:
 ```
-byte0: [OP 4 bits][Rd 4 bits]
-byte1: [Rs1 4 bits][SZ 2 bits][X 2 bits]
+byte0: [OP 8 bits]          (full opcode 0x40–0x46)
+byte1: [Rd 4 bits][Rs1 4 bits]
 byte2-3: OFF16 (little-endian, signed offset)
 ```
 
@@ -200,11 +201,7 @@ byte2-3: OFF16
 byte4-5: Rn (index register number) + scale (2 bits)
 ```
 
-**SZ field (bits[3:2])**:
-- `00` = 8-bit
-- `01` = 16-bit
-- `10` = 32-bit
-- `11` = 64-bit
+Load/store width is determined by the opcode: `ld`/`st` = 64-bit, `ldu`/`lds` = sign/zero-extend (width in SZ), `stw` = 32-bit, `stb` = 8-bit.
 
 | OP | Mnemonic | Operands | Semantics |
 |----|----------|----------|-----------|
@@ -225,11 +222,18 @@ byte4-5: Rn (index register number) + scale (2 bits)
 
 ### 3.4 B-type Instructions (Branch/Jump, 4 bytes, OP 0x60–0x7F)
 
-**Format**:
+**Format (conditional branches, OP 0x63–0x6A)**:
 ```
-byte0:   [OP 4 bits][Rs1 4 bits]
-byte1:   [Rs2 4 bits][IMM12 high 4 bits]
-byte2-3: IMM12 low 8 bits + padding
+byte0:   [OP 8 bits]          (full opcode 0x63–0x6A)
+byte1:   [Rs1 4 bits][Rs2 4 bits]
+byte2-3: IMM12 (little-endian, signed offset)
+```
+
+**Format (`j`/`call`, OP 0x60/0x61)**:
+```
+byte0:   [OP 8 bits]          (full opcode 0x60/0x61)
+byte1:   imm20[19:12]
+byte2-3: imm20[11:0] (little-endian, signed offset)
 ```
 
 **Offset calculation**: `target = PC + sign_ext(IMM12) << 2` (conditional branches)  
@@ -658,7 +662,7 @@ byte1: [PI 4 bits][PO 4 bits]
 
 **Examples**:
 ```
-add r1, r1, r2       # R-type: r1 = r1 + r2 (Rd = Rs1 for accumulator convention)
+add r1, r1, r2       # R-type: r1 = r1 + r2
 addi r3, r1, 0x100    # I-type: r3 = r1 + 256
 ld r4, [r2 + 0x8]     # Load 64-bit
 st r5, [r3 - 0x4]     # Store 64-bit
