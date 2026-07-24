@@ -1,6 +1,6 @@
 # MacroCore-X v1.0 Instruction Set Architecture Specification
 
-**Version**: 1.0  
+**Version**: 0.0.1  
 **Status**: Draft  
 **Target**: General-purpose 64-bit desktop/server processors  
 **Encoding**: Variable-length (2/4/6/8 bytes)  
