@@ -194,6 +194,8 @@ byte1: [Rd 4 bits][Rs1 4 bits]
 byte2-3: OFF16 (little-endian, signed offset)
 ```
 
+> Note: L-type, B-type conditional branches, and C-type instructions use 4-bit register fields (Rd, Rs1, Rs2), limiting them to registers R0–R15. R-type and I-type instructions use 5-bit register fields, supporting all 32 registers (R0–R31).
+
 **Format (6-byte indexed addressing, OP 0x50–0x5F)**:
 ```
 byte0-1: same as above
@@ -201,17 +203,19 @@ byte2-3: OFF16
 byte4-5: Rn (index register number) + scale (2 bits)
 ```
 
-Load/store width is determined by the opcode: `ld`/`st` = 64-bit, `ldu`/`lds` = sign/zero-extend (width in SZ), `stw` = 32-bit, `stb` = 8-bit.
+Load/store width is determined by the opcode: `ld`/`st` = 64-bit, `ldu`/`lds` = 32-bit (sign/zero-extended), `stw` = 32-bit, `stb` = 8-bit.
 
 | OP | Mnemonic | Operands | Semantics |
 |----|----------|----------|-----------|
 | 0x40 | `ld` | Rd, [Rs1 + off] | R[Rd] ← zext(Mem[Rs1+off, 64]) |
-| 0x41 | `ldu` | Rd, [Rs1 + off] | R[Rd] ← zext(Mem[Rs1+off, SZ]) (SZ=10/01/00) |
-| 0x42 | `lds` | Rd, [Rs1 + off] | R[Rd] ← sext(Mem[Rs1+off, SZ]) (SZ≠11) |
+| 0x41 | `ldu` | Rd, [Rs1 + off] | R[Rd] ← zext(Mem[Rs1+off, 32]) |
+| 0x42 | `lds` | Rd, [Rs1 + off] | R[Rd] ← sext(Mem[Rs1+off, 32]) |
 | 0x43 | `st` | Rs1, [Rs2 + off] | Mem[Rs2+off, 64] ← R[Rs1] |
 | 0x44 | `stw` | Rs1, [Rs2 + off] | Mem[Rs2+off, 32] ← R[Rs1] (low 32 bits) |
 | 0x45 | `stb` | Rs1, [Rs2 + off] | Mem[Rs2+off, 8] ← R[Rs1] (low 8 bits) |
 | 0x46 | `lda` | Rd, Rs1, Rs2, scale | R[Rd] ← R[Rs1] + R[Rs2] × scale (scale=1/2/4/8) |
+
+> Note: `lda` reuses the OFF16 field (byte2-3) to encode Rs2 and scale: byte2-3 = (Rs2 << 2) | scale_bits, where scale_bits = 0/1/2/3 for scale 1/2/4/8. Scaling is performed by the microarchitecture, not by the LEA logic.
 | 0x50 | `ldr` | Rd, [Rs1 + Rn*scale + off] | R[Rd] ← Mem[Rs1 + Rn×scale + off, 64] (6 bytes) |
 | 0x51 | `str` | Rs1, [Rs2 + Rn*scale + off] | Mem[Rs2 + Rn×scale + off, 64] ← R[Rs1] (6 bytes) |
 | 0x52-0x5F | *Reserved* | — | — |

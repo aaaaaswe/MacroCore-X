@@ -222,6 +222,13 @@ def parse_reg(s: str) -> int:
     """Parse r0-r31 → 0-31"""
     return int(s[1:])
 
+def parse_reg4(s: str, ctx: str = "") -> int:
+    """Parse r0-r31 → 0-31, but reject registers >= 16 for 4-bit fields."""
+    r = int(s[1:])
+    if r > 15:
+        raise ValueError(f"Register {s} is not allowed in {ctx} (only R0-R15 supported)")
+    return r
+
 def parse_vreg(s: str) -> int:
     """Parse v0-v31 → 0-31"""
     return int(s[1:])
@@ -353,12 +360,13 @@ class Assembler:
                 self.output[patch_offset + 1] = imm12 & 0xFF
             elif inst_type == 'b20':
                 # 20-bit jump offset: patch at byte1-3
+                # byte1 = imm20[19:12], byte2 = imm20[7:0], byte3 = imm20[11:8]
                 pc = patch_offset - 1  # PC of the instruction
                 imm20 = (target - pc) >> 2
                 imm20 = sext(imm20, 20)
-                self.output[patch_offset] = (imm20 >> 16) & 0xFF
-                self.output[patch_offset + 1] = (imm20 >> 8) & 0xFF
-                self.output[patch_offset + 2] = imm20 & 0xFF
+                self.output[patch_offset] = (imm20 >> 12) & 0xFF
+                self.output[patch_offset + 1] = imm20 & 0xFF
+                self.output[patch_offset + 2] = (imm20 >> 8) & 0xF
             elif inst_type == 'la_movi':
                 # la → movi: patch 32-bit absolute address at byte2-5
                 self.output[patch_offset] = (target >> 0) & 0xFF
@@ -480,9 +488,9 @@ class Assembler:
 
         if mnemonic == 'lda':
             # lda Rd, Rs1, Rs2, scale
-            rd = parse_reg(ops[0])
-            rs1 = parse_reg(ops[1])
-            rs2 = parse_reg(ops[2])
+            rd = parse_reg4(ops[0], 'lda')
+            rs1 = parse_reg4(ops[1], 'lda')
+            rs2 = parse_reg4(ops[2], 'lda')
             scale = int(ops[3])
             if scale not in (1, 2, 4, 8):
                 raise ValueError(f"lda scale must be 1, 2, 4, or 8, got {scale}")
@@ -497,13 +505,13 @@ class Assembler:
         if ops[0].startswith('[') or ops[0].startswith('r'):
             # st*, stw, stb: rs1, [rs2 + off]
             if mnemonic.startswith('st'):
-                rs1 = parse_reg(ops[0])
+                rs1 = parse_reg4(ops[0], mnemonic)
                 base, off, _, _ = parse_mem_operand(ops[1])
                 rd = rs1  # source register stored in Rd field for stores
                 rs1_field = base
             else:
                 # ld, ldu, lds: rd, [rs1 + off]
-                rd = parse_reg(ops[0])
+                rd = parse_reg4(ops[0], mnemonic)
                 base, off, _, _ = parse_mem_operand(ops[1])
                 rs1_field = base
         else:
@@ -528,11 +536,11 @@ class Assembler:
         opcode = L_TYPE_6[mnemonic]
 
         if mnemonic == 'ldr':
-            rd = parse_reg(ops[0])
+            rd = parse_reg4(ops[0], 'ldr')
             base, off, idx_reg, scale = parse_mem_operand(ops[1])
             rs1_field = base
         else:  # str
-            rs1 = parse_reg(ops[0])
+            rs1 = parse_reg4(ops[0], 'str')
             base, off, idx_reg, scale = parse_mem_operand(ops[1])
             rd = rs1
             rs1_field = base
@@ -564,9 +572,9 @@ class Assembler:
                 imm20 = (target - pc) >> 2
                 imm20 = sext(imm20, 20)
                 self.output.append(opcode)
-                self.output.append((imm20 >> 16) & 0xFF)
-                self.output.append((imm20 >> 8) & 0xFF)
-                self.output.append(imm20 & 0xFF)
+                self.output.append((imm20 >> 12) & 0xFF)   # byte1 = imm20[19:12]
+                self.output.append(imm20 & 0xFF)            # byte2 = imm20[7:0]
+                self.output.append((imm20 >> 8) & 0xF)      # byte3 = imm20[11:8]
             else:
                 # Label reference
                 self.output.append(opcode)
@@ -578,7 +586,7 @@ class Assembler:
             return
 
         if mnemonic in ('jreg', 'callreg'):
-            rs1 = parse_reg(ops[0])
+            rs1 = parse_reg4(ops[0], mnemonic)
             self.output.append(opcode)
             self.output.append((rs1 & 0xF) << 4)
             self.output.extend(b'\x00\x00')
@@ -586,8 +594,8 @@ class Assembler:
             return
 
         # Conditional branches: beq, bne, blt, ble, bgt, bge, bltu, bgeu
-        rs1 = parse_reg(ops[0])
-        rs2 = parse_reg(ops[1])
+        rs1 = parse_reg4(ops[0], mnemonic)
+        rs2 = parse_reg4(ops[1], mnemonic)
         target_str = ops[2]
 
         self.output.append(opcode)
@@ -720,7 +728,7 @@ class Assembler:
         opcode = C_TYPE[mnemonic]
 
         if mnemonic in ('addm', 'subm'):
-            rs1 = parse_reg(ops[0])
+            rs1 = parse_reg4(ops[0], mnemonic)
             base, off, _, _ = parse_mem_operand(ops[1])
             self.output.append(opcode)
             self.output.append(((rs1 & 0xF) << 4) | (base & 0xF))
@@ -729,7 +737,7 @@ class Assembler:
             self.offset += 6
 
         elif mnemonic == 'xchg':
-            rs1 = parse_reg(ops[0])
+            rs1 = parse_reg4(ops[0], 'xchg')
             base, off, _, _ = parse_mem_operand(ops[1])
             self.output.append(opcode)
             self.output.append(((rs1 & 0xF) << 4) | (base & 0xF))
@@ -738,8 +746,8 @@ class Assembler:
             self.offset += 6
 
         elif mnemonic == 'cmpxchg':
-            rs1 = parse_reg(ops[0])
-            rs2 = parse_reg(ops[1])
+            rs1 = parse_reg4(ops[0], 'cmpxchg')
+            rs2 = parse_reg4(ops[1], 'cmpxchg')
             base, off, _, _ = parse_mem_operand(ops[2])
             self.output.append(opcode)
             self.output.append(((rs1 & 0xF) << 4) | (rs2 & 0xF))
@@ -748,7 +756,7 @@ class Assembler:
             self.offset += 6
 
         elif mnemonic in ('push', 'pop'):
-            rs1 = parse_reg(ops[0])
+            rs1 = parse_reg4(ops[0], mnemonic)
             self.output.append(opcode)
             self.output.append(((rs1 & 0xF) << 4) | 0)
             self.output.extend(b'\x00\x00\x00\x00')
