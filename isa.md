@@ -1,4 +1,4 @@
-# MacroCore-X v1.0 Instruction Set Architecture Specification
+# MacroCore-X v0.0.1 Instruction Set Architecture Specification
 
 **Version**: 0.0.1  
 **Status**: Draft  
