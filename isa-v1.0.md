@@ -15,6 +15,7 @@
 | Component | Count | Width | Description |
 |-----------|-------|-------|-------------|
 | General-purpose registers (GR) | 32 | 64-bit | R0–R31 |
+| Floating-point registers (FR) | 32 | 64-bit | F0–F31 |
 | Vector registers (VR) | 32 | 256-bit | V0–V31 |
 | Program counter (PC) | 1 | 64-bit | Points to current instruction's first byte |
 | Stack pointer (SP) | 1 | 64-bit | Software convention: R2 (not hardwired) |
@@ -32,7 +33,11 @@
 
 > Note: SP is conventionally R2, but the ISA does **not** hardwire this—compilers are free to choose any register as the stack pointer.
 
-### 1.3 Vector Registers
+### 1.3 Floating-Point Registers
+
+F0–F31, 64 bits wide, independent scalar floating-point register file. F-type instructions (fadd, fsub, fmul, etc.) perform IEEE 754 scalar floating-point operations on F registers. F registers are completely independent from V registers (vector registers) — there is no overlap or interference between the two.
+
+### 1.4 Vector Registers
 
 V0–V31, 256 bits wide, capable of holding:
 - 4 × 64-bit integers/floats
@@ -262,41 +267,43 @@ byte3:   AUX  [rm 3 bits][prec 2 bits][rsv 3 bits]
 byte4-5: Reserved
 ```
 
-- **Fd**: destination V register (scalar float result, 0–31)
-- **Fs1, Fs2**: source V registers (scalar float operands, 0–31)
+- **Fd**: destination F register (scalar float result, 0–31)
+- **Fs1, Fs2**: source F registers (scalar float operands, 0–31)
 - **FUNCT8**: operation code
 - **AUX**: precision and rounding mode
   - `prec` (bits [2:1]): 0 = f32, 1 = f64
   - `rm` (bits [6:3]): rounding mode (0 = RNE, 1 = RTZ, 2 = RDN, 3 = RUP)
 
-#### F-type Register Model: V-Register Sub-View
+#### F-type Register Model: Independent Floating-Point Register File
 
-F-type scalar floating-point instructions operate on the **V register file** as a **sub-view**. Specifically:
+F-type scalar floating-point instructions use a **dedicated F register file** (F0–F31, 64-bit each):
 
-- F-type instructions only access the **low 64 bits** of each V register (256-bit).
-- The upper 192 bits of the V register are **ignored** on reads and **preserved** on writes.
-- This means F-type and V-type instructions can coexist: scalar FP operations use the low 64 bits, while vector operations use the full 256-bit width.
-- From the compiler's perspective, F-type operands are V registers — no separate register file is needed. The ABI treats V0–V31 as both scalar FP and vector registers.
+- The F register file contains 32 × 64-bit registers, dedicated exclusively to scalar floating-point operations.
+- F-type instructions operate only on F registers, and are **completely independent** from V registers (vector registers, 256-bit).
+- Floating-point data is transferred between F registers and memory via `fld`/`fst` instructions, or between integer and floating-point via `fcvt` instructions.
+- This design avoids register file reuse and enables true parallel execution of scalar FP and vector operations.
 
-> This design avoids register file duplication while maintaining clean separation between scalar FP and vector operations at the instruction level.
+> Independent FPU design: F registers and V registers are fully decoupled. F-type instructions do not depend on V registers, and V-type instructions do not depend on F registers. Compilers can freely allocate both register files, and hardware can implement independent floating-point and vector execution units.
 
 | FUNCT | Mnemonic | Operands | Semantics |
 |----|----------|----------|-----------|
-| 0x00 | `fadd` | Fd, Fs1, Fs2 | V[Fd].lo64 ← float(V[Fs1].lo64) + float(V[Fs2].lo64) |
-| 0x01 | `fsub` | Fd, Fs1, Fs2 | V[Fd].lo64 ← float(V[Fs1].lo64) - float(V[Fs2].lo64) |
-| 0x02 | `fmul` | Fd, Fs1, Fs2 | V[Fd].lo64 ← float(V[Fs1].lo64) × float(V[Fs2].lo64) |
-| 0x03 | `fdiv` | Fd, Fs1, Fs2 | V[Fd].lo64 ← float(V[Fs1].lo64) ÷ float(V[Fs2].lo64) |
-| 0x04 | `fsqrt` | Fd, Fs1 | V[Fd].lo64 ← sqrt(float(V[Fs1].lo64)) |
-| 0x05 | `fcmp` | Fs1, Fs2 | ZF ← (V[Fs1].lo64==V[Fs2].lo64); CF ← (V[Fs1].lo64<V[Fs2].lo64) |
-| 0x06 | `fcvt.w.s` | Fd, Fs1 | V[Fd].lo64 ← int(float(V[Fs1].lo64)) (truncate) |
-| 0x07 | `fcvt.s.w` | Fd, Fs1 | V[Fd].lo64 ← float(int(V[Fs1].lo64)) |
-| 0x08 | `fmin` | Fd, Fs1, Fs2 | V[Fd].lo64 ← min(float(V[Fs1].lo64), float(V[Fs2].lo64)) |
-| 0x09 | `fmax` | Fd, Fs1, Fs2 | V[Fd].lo64 ← max(float(V[Fs1].lo64), float(V[Fs2].lo64)) |
-| 0x0A | `fneg` | Fd, Fs1 | V[Fd].lo64 ← -float(V[Fs1].lo64) |
-| 0x0B | `fabs` | Fd, Fs1 | V[Fd].lo64 ← abs(float(V[Fs1].lo64)) |
-| 0x0C-0xFF | *Reserved* | — | — |
+| 0x00 | `fadd` | Fd, Fs1, Fs2 | F[Fd] ← float(F[Fs1]) + float(F[Fs2]) |
+| 0x01 | `fsub` | Fd, Fs1, Fs2 | F[Fd] ← float(F[Fs1]) - float(F[Fs2]) |
+| 0x02 | `fmul` | Fd, Fs1, Fs2 | F[Fd] ← float(F[Fs1]) × float(F[Fs2]) |
+| 0x03 | `fdiv` | Fd, Fs1, Fs2 | F[Fd] ← float(F[Fs1]) ÷ float(F[Fs2]) |
+| 0x04 | `fsqrt` | Fd, Fs1 | F[Fd] ← sqrt(float(F[Fs1])) |
+| 0x05 | `fcmp` | Fs1, Fs2 | ZF ← (F[Fs1]==F[Fs2]); CF ← (F[Fs1]<F[Fs2]) |
+| 0x06 | `fcvt.w.s` | Fd, Fs1 | F[Fd] ← int(float(F[Fs1])) (truncate) |
+| 0x07 | `fcvt.s.w` | Fd, Fs1 | F[Fd] ← float(int(F[Fs1])) |
+| 0x08 | `fmin` | Fd, Fs1, Fs2 | F[Fd] ← min(float(F[Fs1]), float(F[Fs2])) |
+| 0x09 | `fmax` | Fd, Fs1, Fs2 | F[Fd] ← max(float(F[Fs1]), float(F[Fs2])) |
+| 0x0A | `fneg` | Fd, Fs1 | F[Fd] ← -float(F[Fs1]) |
+| 0x0B | `fabs` | Fd, Fs1 | F[Fd] ← abs(float(F[Fs1])) |
+| 0x0C | `fld` | Fd, [Rs1 + off] | F[Fd] ← Mem[Rs1+off, 64] |
+| 0x0D | `fst` | Fd, [Rs1 + off] | Mem[Rs1+off, 64] ← F[Fd] |
+| 0x0E-0xFF | *Reserved* | — | — |
 
-> Where `.lo64` denotes the low 64 bits of the V register. The upper 192 bits of V[Fd] are preserved unchanged.
+> F[Fd] denotes the Fd-th register in the F register file (64-bit).
 
 #### 3.5.1 Floating-Point Status Register (CSR_FSR, 0x00A)
 
@@ -656,7 +663,7 @@ addi r3, r1, 0x100    # I-type: r3 = r1 + 256
 ld r4, [r2 + 0x8]     # Load 64-bit
 st r5, [r3 - 0x4]     # Store 64-bit
 call 0x10000          # Function call
-fadd v2, v0, v1       # F-type scalar FP addition
+fadd f2, f0, f1       # F-type scalar FP addition
 vadd v1, v2, v3       # V-type vector addition
 push r6               # Push to stack
 syscall 0x1           # System call
@@ -746,7 +753,7 @@ Convention (Linux x86_64 compatible, simplified):
 | R31 hardware return address | Eliminates extra `jalr` instruction—`call`/`ret` more efficient |
 | R-type 4 bytes (v2.1) | Extended from 2 bytes to support full 32-register file (5-bit fields); resolves v2.0 density vs. register count contradiction |
 | F-type at 0xA0–0xAF (v2.1) | Moved from 0x70–0x7F to the `10` range (6-byte zone) to maintain the "top 2 bits = length" hard decoding rule |
-| F-type as V-register sub-view | Scalar FP operates on low 64 bits of V registers; avoids separate register file and keeps scalar/vector FP unified |
+| F-type uses independent F register file | Scalar FP and vector operations are fully decoupled, enabling true parallel execution; F and V registers are independent, with no reuse |
 | Weak memory model | Suitable for multi-core; `fence` and implicit barriers in `xchg`/`cmpxchg` provide ordering control |
 | Implicit full barriers in atomics | `xchg`/`cmpxchg` include full memory barriers (like x86 `lock`) to simplify lock-free programming |
 | 4-level page table | Compatible with Linux kernel's page table walker; 48-bit virtual, 52-bit physical addresses |
