@@ -79,13 +79,14 @@ V_TYPE = {
     'vshuffle': 0x0A, 'vfmadd': 0x0B,
 }
 
-# F-type: 6 bytes, scalar FP extension (optional)
+# F-type: 6 bytes, scalar FP extension (independent FPU)
 # byte0 = 0xA0 | Fd, byte1 = (Fs1<<4)|Fs2, byte2 = funct8, byte3 = aux,
 # byte4-5 = reserved
 F_TYPE = {
     'fadd': 0x00, 'fsub': 0x01, 'fmul': 0x02, 'fdiv': 0x03,
     'fsqrt': 0x04, 'fcmp': 0x05, 'fcvt.w.s': 0x06, 'fcvt.s.w': 0x07,
     'fmin': 0x08, 'fmax': 0x09, 'fneg': 0x0A, 'fabs': 0x0B,
+    'fld': 0x0C, 'fst': 0x0D,
 }
 
 # C-type: 6 bytes, byte0 = opcode, byte1-5 = varies
@@ -151,6 +152,8 @@ def tokenize(source: str) -> List[Token]:
                 tokens.append(Token('reg', part.lower(), line_no))
             elif re.match(r'^[vV]\d+$', part):
                 tokens.append(Token('vreg', part.lower(), line_no))
+            elif re.match(r'^[fF]\d+$', part):
+                tokens.append(Token('freg', part.lower(), line_no))
             elif part.startswith('0x') or part.startswith('-0x') or part.lstrip('-').isdigit():
                 tokens.append(Token('imm', part, line_no))
             else:
@@ -221,6 +224,10 @@ def parse_reg(s: str) -> int:
 
 def parse_vreg(s: str) -> int:
     """Parse v0-v31 → 0-31"""
+    return int(s[1:])
+
+def parse_freg(s: str) -> int:
+    """Parse f0-f31 → 0-31"""
     return int(s[1:])
 
 def parse_imm(s: str) -> int:
@@ -650,7 +657,7 @@ class Assembler:
             self.output.extend(b'\x00\x00')
             self.offset += 6
 
-    # ---- F-type (Scalar FP) ----
+    # ---- F-type (Scalar FP, independent FPU) ----
     def _emit_f(self, mnemonic, ops):
         """Emit F-type scalar FP instruction (6 bytes).
         byte0 = 0xA0 | Fd, byte1 = (Fs1<<4)|Fs2, byte2 = funct, byte3 = aux, byte4-5 = reserved
@@ -660,16 +667,22 @@ class Assembler:
         if mnemonic == 'fcmp':
             # fcmp Fs1, Fs2 — no destination, sets flags
             fd = 0
-            fs1 = parse_vreg(ops[0])
-            fs2 = parse_vreg(ops[1])
+            fs1 = parse_freg(ops[0])
+            fs2 = parse_freg(ops[1])
         elif mnemonic in ('fsqrt', 'fneg', 'fabs', 'fcvt.w.s', 'fcvt.s.w'):
-            fd = parse_vreg(ops[0])
-            fs1 = parse_vreg(ops[1])
+            fd = parse_freg(ops[0])
+            fs1 = parse_freg(ops[1])
+            fs2 = 0
+        elif mnemonic in ('fld', 'fst'):
+            # fld Fd, [Rs1 + off] / fst Fd, [Rs1 + off]
+            fd = parse_freg(ops[0])
+            base, off, _, _ = parse_mem_operand(ops[1])
+            fs1 = base
             fs2 = 0
         else:
-            fd = parse_vreg(ops[0])
-            fs1 = parse_vreg(ops[1])
-            fs2 = parse_vreg(ops[2])
+            fd = parse_freg(ops[0])
+            fs1 = parse_freg(ops[1])
+            fs2 = parse_freg(ops[2])
 
         # aux byte: [rm 3 bits][prec 2 bits][rsv 3 bits]
         # prec: 0=f32, 1=f64; rm: 0=RNE, 1=RTZ, 2=RDN, 3=RUP
@@ -679,7 +692,12 @@ class Assembler:
         self.output.append(((fs1 & 0xF) << 4) | (fs2 & 0xF))
         self.output.append(funct)
         self.output.append(aux)
-        self.output.extend(b'\x00\x00')
+
+        if mnemonic in ('fld', 'fst'):
+            # byte4-5 = offset for fld/fst
+            self.output.extend(pack_i16(off))
+        else:
+            self.output.extend(b'\x00\x00')
         self.offset += 6
 
     # ---- C-type ----

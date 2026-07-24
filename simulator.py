@@ -24,6 +24,8 @@ class CPU:
         self.r = [0] * 32
         # Vector registers V0-V31 (256-bit each, stored as list of ints)
         self.v = [0] * 32  # simplified: store as scalar for now
+        # Scalar FP registers F0-F31 (64-bit each, independent FPU)
+        self.f = [0] * 32
         # Program counter
         self.pc = 0
         # Flags: CF, ZF, SF, OF
@@ -115,6 +117,7 @@ F_MNEMONICS = {
     0x00: 'fadd', 0x01: 'fsub', 0x02: 'fmul', 0x03: 'fdiv',
     0x04: 'fsqrt', 0x05: 'fcmp', 0x06: 'fcvt.w.s', 0x07: 'fcvt.s.w',
     0x08: 'fmin', 0x09: 'fmax', 0x0A: 'fneg', 0x0B: 'fabs',
+    0x0C: 'fld', 0x0D: 'fst',
 }
 
 C_MNEMONICS = {
@@ -290,7 +293,7 @@ def disassemble_one(cpu: CPU, pc: int) -> Tuple[str, int]:
         return f"{mnem} v{vd}, v{vs1}, v{vs2}", length
 
     elif (opcode & 0xF0) == 0xA0:
-        # F-type scalar FP
+        # F-type scalar FP (independent FPU registers)
         byte1 = cpu.read_byte(pc + 1)
         fd = opcode & 0xF
         fs1 = (byte1 >> 4) & 0xF
@@ -301,10 +304,16 @@ def disassemble_one(cpu: CPU, pc: int) -> Tuple[str, int]:
         prec = 'f64' if (aux & 0x06) else 'f32'  # prec in bits [2:1]
 
         if mnem in ('fsqrt', 'fneg', 'fabs', 'fcvt.w.s', 'fcvt.s.w'):
-            return f"{mnem} v{fd}, v{fs1}", length
+            return f"{mnem} f{fd}, f{fs1}", length
         if mnem == 'fcmp':
-            return f"{mnem} v{fs1}, v{fs2}", length
-        return f"{mnem} v{fd}, v{fs1}, v{fs2}", length
+            return f"{mnem} f{fs1}, f{fs2}", length
+        if mnem == 'fld':
+            off = cpu.read_i16(pc + 4)
+            return f"{mnem} f{fd}, [r{fs1} + {off}]", length
+        if mnem == 'fst':
+            off = cpu.read_i16(pc + 4)
+            return f"{mnem} f{fd}, [r{fs1} + {off}]", length
+        return f"{mnem} f{fd}, f{fs1}, f{fs2}", length
 
     elif 0x90 <= opcode <= 0x97:
         # C-type
@@ -413,14 +422,14 @@ def f64_to_int(val: float) -> int:
     return struct.unpack('<Q', struct.pack('<d', val))[0]
 
 def fp_execute_f(cpu: CPU, fd: int, fs1: int, fs2: int, funct: int, aux: int):
-    """Execute F-type scalar FP operation on V registers.
+    """Execute F-type scalar FP operation on independent F registers.
     aux byte: [rm 3 bits][prec 2 bits][rsv 3 bits]
     prec: bits [2:1] — 0=f32, 1=f64
     """
     is_f64 = ((aux >> 1) & 0x3) == 1
     if is_f64:
-        a = int_to_f64(cpu.v[fs1])
-        b = int_to_f64(cpu.v[fs2]) if funct not in (0x04, 0x06, 0x07) else 0.0
+        a = int_to_f64(cpu.f[fs1])
+        b = int_to_f64(cpu.f[fs2]) if funct not in (0x04, 0x06, 0x07) else 0.0
         if funct == 0x00:  # fadd
             result = a + b
         elif funct == 0x01:  # fsub
@@ -441,10 +450,10 @@ def fp_execute_f(cpu: CPU, fd: int, fs1: int, fs2: int, funct: int, aux: int):
             result = a if a > b else b
         else:
             result = 0.0
-        cpu.v[fd] = f64_to_int(result)
+        cpu.f[fd] = f64_to_int(result)
     else:
-        a = int_to_f32(cpu.v[fs1])
-        b = int_to_f32(cpu.v[fs2]) if funct not in (0x04, 0x06, 0x07) else 0.0
+        a = int_to_f32(cpu.f[fs1])
+        b = int_to_f32(cpu.f[fs2]) if funct not in (0x04, 0x06, 0x07) else 0.0
         if funct == 0x00:  # fadd
             result = a + b
         elif funct == 0x01:  # fsub
@@ -465,18 +474,18 @@ def fp_execute_f(cpu: CPU, fd: int, fs1: int, fs2: int, funct: int, aux: int):
             result = a if a > b else b
         else:
             result = 0.0
-        cpu.v[fd] = f32_to_int(result)
+        cpu.f[fd] = f32_to_int(result)
 
 
 def fp_compare(cpu: CPU, fs1: int, fs2: int, aux: int):
     """Execute F-type fcmp: set CPU flags based on float comparison."""
     is_f64 = ((aux >> 1) & 0x3) == 1
     if is_f64:
-        a = int_to_f64(cpu.v[fs1])
-        b = int_to_f64(cpu.v[fs2])
+        a = int_to_f64(cpu.f[fs1])
+        b = int_to_f64(cpu.f[fs2])
     else:
-        a = int_to_f32(cpu.v[fs1])
-        b = int_to_f32(cpu.v[fs2])
+        a = int_to_f32(cpu.f[fs1])
+        b = int_to_f32(cpu.f[fs2])
     cpu.zf = 1 if a == b else 0
     cpu.cf = 1 if a < b else 0
     cpu.sf = 0
@@ -487,19 +496,19 @@ def fp_unary(cpu: CPU, fd: int, fs1: int, aux: int, negate: bool):
     """Execute F-type unary FP operation: fneg or fabs."""
     is_f64 = ((aux >> 1) & 0x3) == 1
     if is_f64:
-        a = int_to_f64(cpu.v[fs1])
+        a = int_to_f64(cpu.f[fs1])
         if negate:
             result = -a
         else:
             result = abs(a)
-        cpu.v[fd] = f64_to_int(result)
+        cpu.f[fd] = f64_to_int(result)
     else:
-        a = int_to_f32(cpu.v[fs1])
+        a = int_to_f32(cpu.f[fs1])
         if negate:
             result = -a
         else:
             result = abs(a)
-        cpu.v[fd] = f32_to_int(result)
+        cpu.f[fd] = f32_to_int(result)
 
 
 def execute_one(cpu: CPU, trace: bool = False) -> bool:
@@ -913,6 +922,14 @@ def execute_one(cpu: CPU, trace: bool = False) -> bool:
             fp_unary(cpu, fd, fs1, aux, negate=True)
         elif funct == 0x0B:  # fabs
             fp_unary(cpu, fd, fs1, aux, negate=False)
+        elif funct == 0x0C:  # fld: load from memory into F register
+            off = cpu.read_i16(pc + 4)
+            addr = (cpu.r[fs1] + off) & 0xFFFFFFFFFFFFFFFF
+            cpu.f[fd] = cpu.read_mem(addr, 8)
+        elif funct == 0x0D:  # fst: store F register to memory
+            off = cpu.read_i16(pc + 4)
+            addr = (cpu.r[fs1] + off) & 0xFFFFFFFFFFFFFFFF
+            cpu.write_mem(addr, 8, cpu.f[fd])
 
         cpu.pc += length
         cpu.r[0] = 0
@@ -1138,6 +1155,10 @@ def simulate(cpu: CPU, max_steps: int = 0, trace: bool = False):
         regs = '  '.join(f"R{i+j:2d}=0x{cpu.r[i+j]:016x}" for j in range(4))
         print(f"  {regs}")
     print(f"  Flags: CF={cpu.cf} ZF={cpu.zf} SF={cpu.sf} OF={cpu.of}")
+    print(f"  F-Registers:")
+    for i in range(0, 32, 4):
+        fregs = '  '.join(f"F{i+j:2d}=0x{cpu.f[i+j]:016x}" for j in range(4))
+        print(f"  {fregs}")
     print(f"{'='*60}")
 
 
