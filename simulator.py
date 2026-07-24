@@ -50,30 +50,193 @@ class CPU:
         # Instruction count for disassembly
         self.inst_count = 0
 
+        # ---- MMU State ----
+        # CSR registers
+        self.csr_cr3 = 0      # page table base (physical address)
+        self.csr_mode = 0     # [0]=PRIV, [1]=ALIGN, [3:2]=VLEN
+        self.csr_ivec = 0     # exception vector table base
+
+        # MMU enabled when CR3 is non-zero and PRIV=1 (user mode)
+        self.mmu_enabled = False
+
+        # TLB: 16-entry direct-mapped cache
+        # Each entry: (tag, ppn, flags, valid)
+        self.tlb = [(0, 0, 0, False) for _ in range(16)]
+
+        # Page walk statistics
+        self.tlb_hits = 0
+        self.tlb_misses = 0
+        self.page_faults = 0
+
+    def _mmu_update(self):
+        """Update MMU enabled state based on CR3 and privilege."""
+        self.mmu_enabled = (self.csr_cr3 != 0) and (self.priv == 1)
+
+    def _tlb_lookup(self, vpn: int) -> tuple:
+        """Look up VPN in TLB. Returns (ppn, flags) or None on miss."""
+        idx = vpn & 0xF
+        tag, ppn, flags, valid = self.tlb[idx]
+        if valid and tag == vpn:
+            self.tlb_hits += 1
+            return (ppn, flags)
+        self.tlb_misses += 1
+        return None
+
+    def _tlb_insert(self, vpn: int, ppn: int, flags: int):
+        """Insert a TLB entry."""
+        idx = vpn & 0xF
+        self.tlb[idx] = (vpn, ppn, flags, True)
+
+    def _page_walk(self, vaddr: int, is_write: bool) -> int:
+        """Walk the 4-level page table and return physical address.
+        Returns -1 on page fault.
+        """
+        if self.csr_cr3 == 0:
+            self.page_faults += 1
+            return -1
+
+        # VPN decomposition (4KB page):
+        vpn3 = (vaddr >> 39) & 0x1FF
+        vpn2 = (vaddr >> 30) & 0x1FF
+        vpn1 = (vaddr >> 21) & 0x1FF
+        vpn0 = (vaddr >> 12) & 0x1FF
+        offset = vaddr & 0xFFF
+
+        # Level 3 (root) — non-leaf, only check V bit
+        pte = self._read_pte(self.csr_cr3 + vpn3 * 8)
+        if pte is None or not (pte[0] & 1):
+            self.page_faults += 1
+            return -1
+
+        # Level 2 — non-leaf, only check V bit
+        next_ppn = (pte[1] >> 12) & 0xFFFFFFFFFF
+        pte = self._read_pte((next_ppn << 12) + vpn2 * 8)
+        if pte is None or not (pte[0] & 1):
+            self.page_faults += 1
+            return -1
+
+        # Level 1 — non-leaf, only check V bit
+        next_ppn = (pte[1] >> 12) & 0xFFFFFFFFFF
+        pte = self._read_pte((next_ppn << 12) + vpn1 * 8)
+        if pte is None or not (pte[0] & 1):
+            self.page_faults += 1
+            return -1
+
+        # Level 0 (leaf) — check all permission bits
+        next_ppn = (pte[1] >> 12) & 0xFFFFFFFFFF
+        pte = self._read_pte((next_ppn << 12) + vpn0 * 8)
+        if pte is None or not (pte[0] & 1):
+            self.page_faults += 1
+            return -1
+
+        flags = pte[0]
+        ppn = (pte[1] >> 12) & 0xFFFFFFFFFF
+
+        # Check leaf access permissions
+        if not (flags & 2):  # R bit
+            self.page_faults += 1
+            return -1
+        if is_write and not (flags & 8):  # W bit
+            self.page_faults += 1
+            return -1
+
+        # Set A bit (accessed) and D bit (dirty) in the PTE
+        new_flags = flags | (1 << 5)  # A bit
+        if is_write:
+            new_flags |= (1 << 4)  # D bit
+        if new_flags != flags:
+            self._write_pte((next_ppn << 12) + vpn0 * 8, (new_flags, pte[1]))
+
+        # Insert into TLB
+        vpn = vaddr >> 12
+        self._tlb_insert(vpn, ppn, new_flags)
+
+        return (ppn << 12) | offset
+
+    def _read_pte(self, paddr: int) -> tuple:
+        """Read a 64-bit PTE from physical memory. Returns (flags, raw_val) or None."""
+        try:
+            if paddr < 0 or paddr + 8 > self.mem_size:
+                return None
+            raw = int.from_bytes(self.mem[paddr:paddr+8], 'little', signed=False)
+            flags = raw & 0xFF
+            return (flags, raw)
+        except:
+            return None
+
+    def _write_pte(self, paddr: int, pte: tuple):
+        """Write a 64-bit PTE to physical memory."""
+        flags, raw = pte
+        new_raw = (raw & ~0xFF) | (flags & 0xFF)
+        try:
+            self.mem[paddr:paddr+8] = new_raw.to_bytes(8, 'little', signed=False)
+        except:
+            pass
+
+    def translate(self, vaddr: int, is_write: bool = False) -> int:
+        """Translate virtual address to physical address.
+        Returns physical address, or raises exception on page fault.
+        """
+        if not self.mmu_enabled:
+            return vaddr & 0xFFFFFFFFFFFFFFFF
+
+        # Check TLB
+        vpn = vaddr >> 12
+        tlb_entry = self._tlb_lookup(vpn)
+        if tlb_entry is not None:
+            ppn, flags = tlb_entry
+            # Re-check write permission if this is a write
+            if is_write and not (flags & 8):
+                self.page_faults += 1
+                return -1
+            return (ppn << 12) | (vaddr & 0xFFF)
+
+        # TLB miss — walk page table
+        paddr = self._page_walk(vaddr, is_write)
+        return paddr
+
     def read_mem(self, addr: int, size: int, signed: bool = False) -> int:
-        """Read from memory."""
-        if addr < 0 or addr + size > self.mem_size:
-            raise Exception(f"Memory access out of bounds: 0x{addr:x}")
-        data = int.from_bytes(self.mem[addr:addr+size], 'little', signed=signed)
+        """Read from memory (virtual address — translated if MMU enabled)."""
+        paddr = self.translate(addr, is_write=False)
+        if paddr < 0:
+            raise Exception(f"MMU page fault at virtual address 0x{addr:x}")
+        if paddr < 0 or paddr + size > self.mem_size:
+            raise Exception(f"Memory access out of bounds: va=0x{addr:x} pa=0x{paddr:x}")
+        data = int.from_bytes(self.mem[paddr:paddr+size], 'little', signed=signed)
         return data
 
     def write_mem(self, addr: int, size: int, value: int):
-        """Write to memory."""
-        if addr < 0 or addr + size > self.mem_size:
-            raise Exception(f"Memory access out of bounds: 0x{addr:x}")
-        self.mem[addr:addr+size] = value.to_bytes(size, 'little', signed=False)
+        """Write to memory (virtual address — translated if MMU enabled)."""
+        paddr = self.translate(addr, is_write=True)
+        if paddr < 0:
+            raise Exception(f"MMU page fault at virtual address 0x{addr:x}")
+        if paddr < 0 or paddr + size > self.mem_size:
+            raise Exception(f"Memory access out of bounds: va=0x{addr:x} pa=0x{paddr:x}")
+        self.mem[paddr:paddr+size] = value.to_bytes(size, 'little', signed=False)
 
     def read_byte(self, addr: int) -> int:
-        return self.mem[addr]
+        paddr = self.translate(addr, is_write=False)
+        if paddr < 0:
+            raise Exception(f"MMU page fault at virtual address 0x{addr:x}")
+        return self.mem[paddr]
 
     def read_u16(self, addr: int) -> int:
-        return struct.unpack_from('<H', self.mem, addr)[0]
+        paddr = self.translate(addr, is_write=False)
+        if paddr < 0:
+            raise Exception(f"MMU page fault at virtual address 0x{addr:x}")
+        return struct.unpack_from('<H', self.mem, paddr)[0]
 
     def read_u32(self, addr: int) -> int:
-        return struct.unpack_from('<I', self.mem, addr)[0]
+        paddr = self.translate(addr, is_write=False)
+        if paddr < 0:
+            raise Exception(f"MMU page fault at virtual address 0x{addr:x}")
+        return struct.unpack_from('<I', self.mem, paddr)[0]
 
     def read_i16(self, addr: int) -> int:
-        return struct.unpack_from('<h', self.mem, addr)[0]
+        paddr = self.translate(addr, is_write=False)
+        if paddr < 0:
+            raise Exception(f"MMU page fault at virtual address 0x{addr:x}")
+        return struct.unpack_from('<h', self.mem, paddr)[0]
 
 
 # =============================================================================
@@ -990,6 +1153,8 @@ def execute_one(cpu: CPU, trace: bool = False) -> bool:
         imm8 = cpu.read_byte(pc + 1)
 
         if opcode == 0xB0:  # syscall
+            cpu.priv = 0  # enter kernel mode
+            cpu._mmu_update()
             syscall_handler(cpu, imm8)
             if cpu.halted:
                 cpu.pc += length
@@ -998,12 +1163,14 @@ def execute_one(cpu: CPU, trace: bool = False) -> bool:
                 return False
         elif opcode == 0xB1:  # sysret
             cpu.priv = 1
+            cpu._mmu_update()
             cpu.pc = cpu.err
         elif opcode == 0xB2:  # int
             raise_exception(cpu, imm8)
         elif opcode == 0xB3:  # iret
             cpu.pc = cpu.err
             cpu.priv = 1
+            cpu._mmu_update()
         elif opcode == 0xB6:  # cpuid
             cpu.r[0] = 0x4D43584D  # "MCXM"
             cpu.r[1] = 0x00020000  # version 2.0
@@ -1052,10 +1219,10 @@ def execute_one(cpu: CPU, trace: bool = False) -> bool:
         imm_lo = cpu.read_byte(pc + 2)
         imm12 = (imm_hi << 8) | imm_lo
 
-        if opcode == 0xA4:  # rdmsr
-            cpu.r[rs1] = 0  # simplified
-        elif opcode == 0xA5:  # wrmsr
-            pass  # simplified
+        if opcode == 0xB4:  # rdmsr
+            cpu.r[rs1] = csr_read(cpu, imm12)
+        elif opcode == 0xB5:  # wrmsr
+            csr_write(cpu, imm12, cpu.r[rs1])
 
         cpu.pc += length
         cpu.r[0] = 0
@@ -1067,6 +1234,41 @@ def execute_one(cpu: CPU, trace: bool = False) -> bool:
     return True
 
 
+def csr_read(cpu: CPU, csr_num: int) -> int:
+    """Read Control and Status Register."""
+    if csr_num == 0x000:  # CSR_ERR
+        return cpu.err
+    elif csr_num == 0x001:  # CSR_EF
+        return cpu.ef
+    elif csr_num == 0x002:  # CSR_MODE
+        return cpu.csr_mode
+    elif csr_num == 0x003:  # CSR_CR3
+        return cpu.csr_cr3
+    elif csr_num == 0x004:  # CSR_IVEC
+        return cpu.csr_ivec
+    elif csr_num == 0x00A:  # CSR_FSR
+        return 0  # simplified
+    else:
+        return 0
+
+def csr_write(cpu: CPU, csr_num: int, value: int):
+    """Write Control and Status Register."""
+    if csr_num == 0x000:  # CSR_ERR
+        cpu.err = value
+    elif csr_num == 0x001:  # CSR_EF
+        cpu.ef = value & 0xFF
+    elif csr_num == 0x002:  # CSR_MODE
+        cpu.csr_mode = value
+        cpu.priv = value & 1
+        cpu._mmu_update()
+    elif csr_num == 0x003:  # CSR_CR3
+        cpu.csr_cr3 = value & 0xFFFFFFFFFFFFF000  # 4KB aligned
+        cpu._mmu_update()
+    elif csr_num == 0x004:  # CSR_IVEC
+        cpu.csr_ivec = value & 0xFFFFFFFFFFFFF000  # 4KB aligned
+    elif csr_num == 0x00A:  # CSR_FSR
+        pass  # simplified
+
 def raise_exception(cpu: CPU, vector: int):
     """Handle exception."""
     cpu.err = cpu.pc
@@ -1074,8 +1276,10 @@ def raise_exception(cpu: CPU, vector: int):
     ef = (cpu.cf) | (cpu.zf << 1) | (cpu.sf << 2) | (cpu.of << 3)
     cpu.ef = ef
     cpu.priv = 0
-    # Jump to exception handler at vector table (simplified: at 0x1000)
-    cpu.pc = 0x1000 + vector * 8
+    cpu._mmu_update()
+    # Jump to exception handler at vector table
+    vec_base = cpu.csr_ivec if cpu.csr_ivec != 0 else 0x1000
+    cpu.pc = vec_base + vector * 8
 
 
 def syscall_handler(cpu: CPU, imm8: int):
@@ -1159,6 +1363,9 @@ def simulate(cpu: CPU, max_steps: int = 0, trace: bool = False):
     for i in range(0, 32, 4):
         fregs = '  '.join(f"F{i+j:2d}=0x{cpu.f[i+j]:016x}" for j in range(4))
         print(f"  {fregs}")
+    if cpu.csr_cr3 != 0:
+        print(f"  MMU: CR3=0x{cpu.csr_cr3:016x} PRIV={cpu.priv} enabled={cpu.mmu_enabled}")
+        print(f"  TLB: hits={cpu.tlb_hits} misses={cpu.tlb_misses} page_faults={cpu.page_faults}")
     print(f"{'='*60}")
 
 
