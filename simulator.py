@@ -87,7 +87,7 @@ class CPU:
         idx = vpn & 0xF
         self.tlb[idx] = (vpn, ppn, flags, True)
 
-    def _page_walk(self, vaddr: int, is_write: bool) -> int:
+    def _page_walk(self, vaddr: int, is_write: bool, is_execute: bool = False) -> int:
         """Walk the 4-level page table and return physical address.
         Returns -1 on page fault.
         """
@@ -139,6 +139,9 @@ class CPU:
         if is_write and not (flags & 8):  # W bit
             self.page_faults += 1
             return -1
+        if is_execute and not (flags & 4):  # X bit
+            self.page_faults += 1
+            return -1
 
         # Set A bit (accessed) and D bit (dirty) in the PTE
         new_flags = flags | (1 << 5)  # A bit
@@ -173,7 +176,7 @@ class CPU:
         except Exception:
             pass
 
-    def translate(self, vaddr: int, is_write: bool = False) -> int:
+    def translate(self, vaddr: int, is_write: bool = False, is_execute: bool = False) -> int:
         """Translate virtual address to physical address.
         Returns physical address, or raises exception on page fault.
         """
@@ -189,10 +192,14 @@ class CPU:
             if is_write and not (flags & 8):
                 self.page_faults += 1
                 return -1
+            # Re-check execute permission if this is an instruction fetch
+            if is_execute and not (flags & 4):
+                self.page_faults += 1
+                return -1
             return (ppn << 12) | (vaddr & 0xFFF)
 
         # TLB miss — walk page table
-        paddr = self._page_walk(vaddr, is_write)
+        paddr = self._page_walk(vaddr, is_write, is_execute)
         return paddr
 
     def read_mem(self, addr: int, size: int, signed: bool = False) -> int:
@@ -214,8 +221,8 @@ class CPU:
             raise Exception(f"Memory access out of bounds: va=0x{addr:x} pa=0x{paddr:x}")
         self.mem[paddr:paddr+size] = value.to_bytes(size, 'little', signed=False)
 
-    def read_byte(self, addr: int) -> int:
-        paddr = self.translate(addr, is_write=False)
+    def read_byte(self, addr: int, is_execute: bool = False) -> int:
+        paddr = self.translate(addr, is_write=False, is_execute=is_execute)
         if paddr < 0:
             raise Exception(f"MMU page fault at virtual address 0x{addr:x}")
         return self.mem[paddr]
@@ -314,7 +321,7 @@ def get_inst_length(cpu: CPU, opcode: int, pc: int) -> int:
     if (opcode & 0xF0) == 0x80:
         # V-type: check funct for vfmadd (8 bytes)
         if len(cpu.mem) > pc + 2:
-            funct = cpu.read_byte(pc + 2)
+            funct = cpu.read_byte(pc + 2, is_execute=True)
             if funct == 0x0B:  # vfmadd
                 return 8
         return 6
@@ -413,7 +420,7 @@ def disassemble_one(cpu: CPU, pc: int) -> Tuple[str, int]:
             imm_hi = byte1 & 0xFF
             imm_mid = cpu.read_byte(pc + 2)
             imm_lo = cpu.read_byte(pc + 3)
-            imm20 = (imm_hi << 16) | (imm_mid << 8) | imm_lo
+            imm20 = (imm_hi << 12) | ((imm_lo & 0xF) << 8) | imm_mid
             imm20 = sign_extend_64(imm20, 20)
             target = pc + (imm20 << 2)
             return f"{mnem} 0x{target:x}", length
@@ -488,13 +495,13 @@ def disassemble_one(cpu: CPU, pc: int) -> Tuple[str, int]:
 
         if mnem in ('addm', 'subm', 'xchg'):
             off = cpu.read_i16(pc + 2)
-            return f"{mnem} r{rd}, [r{rs2} + {off}]", length
+            return f"{mnem} r{rs1}, [r{rs2} + {off}]", length
         if mnem == 'cmpxchg':
             off = cpu.read_i16(pc + 2)
             base = cpu.read_u16(pc + 4) & 0xF
-            return f"{mnem} r{rd}, r{rs2}, [r{base} + {off}]", length
+            return f"{mnem} r{rs1}, r{rs2}, [r{base} + {off}]", length
         if mnem in ('push', 'pop'):
-            return f"{mnem} r{rd}", length
+            return f"{mnem} r{rs1}", length
         if mnem == 'enter':
             imm = cpu.read_i16(pc + 2)
             return f"{mnem} {imm}", length
@@ -657,7 +664,7 @@ def execute_one(cpu: CPU, trace: bool = False) -> bool:
     Execute one instruction. Returns True if execution should continue.
     """
     pc = cpu.pc
-    opcode = cpu.read_byte(pc)
+    opcode = cpu.read_byte(pc, is_execute=True)
     length = get_inst_length(cpu, opcode, pc)
 
     if trace:
@@ -692,7 +699,10 @@ def execute_one(cpu: CPU, trace: bool = False) -> bool:
                 return True
             s1 = sign_extend_64(val1, 64)
             s2 = sign_extend_64(val2, 64)
-            q = int(s1 / s2)  # truncate toward zero
+            # Truncate toward zero using integer division
+            q = abs(s1) // abs(s2)
+            if (s1 < 0) != (s2 < 0):
+                q = -q
             result = q & 0xFFFFFFFFFFFFFFFF
             cpu.r[rd] = result
             cpu.zf = 1 if result == 0 else 0
@@ -915,7 +925,7 @@ def execute_one(cpu: CPU, trace: bool = False) -> bool:
             imm_hi = byte1 & 0xFF
             imm_mid = cpu.read_byte(pc + 2)
             imm_lo = cpu.read_byte(pc + 3)
-            imm20 = (imm_hi << 16) | (imm_mid << 8) | imm_lo
+            imm20 = (imm_hi << 12) | ((imm_lo & 0xF) << 8) | imm_mid
             imm20 = sign_extend_64(imm20, 20)
             cpu.pc = (pc + (imm20 << 2)) & 0xFFFFFFFFFFFFFFFF
             cpu.r[0] = 0
@@ -926,7 +936,7 @@ def execute_one(cpu: CPU, trace: bool = False) -> bool:
             imm_hi = byte1 & 0xFF
             imm_mid = cpu.read_byte(pc + 2)
             imm_lo = cpu.read_byte(pc + 3)
-            imm20 = (imm_hi << 16) | (imm_mid << 8) | imm_lo
+            imm20 = (imm_hi << 12) | ((imm_lo & 0xF) << 8) | imm_mid
             imm20 = sign_extend_64(imm20, 20)
             cpu.r[31] = pc + 4
             cpu.pc = (pc + (imm20 << 2)) & 0xFFFFFFFFFFFFFFFF
@@ -1090,30 +1100,30 @@ def execute_one(cpu: CPU, trace: bool = False) -> bool:
             off = cpu.read_i16(pc + 2)
             addr = (cpu.r[rs2] + off) & 0xFFFFFFFFFFFFFFFF
             val = cpu.read_mem(addr, 8)
-            cpu.write_mem(addr, 8, (val + cpu.r[rd]) & 0xFFFFFFFFFFFFFFFF)
+            cpu.write_mem(addr, 8, (val + cpu.r[rs1]) & 0xFFFFFFFFFFFFFFFF)
         elif opcode == 0x91:  # subm
             off = cpu.read_i16(pc + 2)
             addr = (cpu.r[rs2] + off) & 0xFFFFFFFFFFFFFFFF
             val = cpu.read_mem(addr, 8)
-            cpu.write_mem(addr, 8, (val - cpu.r[rd]) & 0xFFFFFFFFFFFFFFFF)
+            cpu.write_mem(addr, 8, (val - cpu.r[rs1]) & 0xFFFFFFFFFFFFFFFF)
         elif opcode == 0x92:  # xchg
             off = cpu.read_i16(pc + 2)
             addr = (cpu.r[rs2] + off) & 0xFFFFFFFFFFFFFFFF
             val = cpu.read_mem(addr, 8)
-            cpu.write_mem(addr, 8, cpu.r[rd])
-            cpu.r[rd] = val
+            cpu.write_mem(addr, 8, cpu.r[rs1])
+            cpu.r[rs1] = val
         elif opcode == 0x93:  # cmpxchg
             off = cpu.read_i16(pc + 2)
             base = cpu.read_u16(pc + 4) & 0xF
             addr = (cpu.r[base] + off) & 0xFFFFFFFFFFFFFFFF
             val = cpu.read_mem(addr, 8)
-            if val == cpu.r[rd]:
+            if val == cpu.r[rs1]:
                 cpu.write_mem(addr, 8, cpu.r[rs2])
         elif opcode == 0x94:  # push
             cpu.r[2] = (cpu.r[2] - 8) & 0xFFFFFFFFFFFFFFFF
-            cpu.write_mem(cpu.r[2], 8, cpu.r[rd])
+            cpu.write_mem(cpu.r[2], 8, cpu.r[rs1])
         elif opcode == 0x95:  # pop
-            cpu.r[rd] = cpu.read_mem(cpu.r[2], 8)
+            cpu.r[rs1] = cpu.read_mem(cpu.r[2], 8)
             cpu.r[2] = (cpu.r[2] + 8) & 0xFFFFFFFFFFFFFFFF
         elif opcode == 0x96:  # enter
             imm = cpu.read_i16(pc + 2)

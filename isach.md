@@ -213,6 +213,8 @@ IMM 为14位立即数（byte2[5:0]||byte3[7:0]），大多数指令将其符号�
 字节2-3: OFF16（小端有符号偏移）
 ```
 
+> 注：L-type、B-type 条件分支和 C-type 指令使用 4 位寄存器字段（Rd、Rs1、Rs2），仅能访问 R0–R15。R-type 和 I-type 指令使用 5 位寄存器字段，可访问全部 32 个寄存器（R0–R31）。
+
 **格式（6字节索引寻址，OP 0x50–0x5F）**：
 ```
 字节0-1: 同上
@@ -220,17 +222,19 @@ IMM 为14位立即数（byte2[5:0]||byte3[7:0]），大多数指令将其符号�
 字节4-5: Rn（索引寄存器编号）+ 缩放因子（2位）
 ```
 
-加载/存储宽度由操作码决定：`ld`/`st` = 64位，`ldu`/`lds` = 符号/零扩展（宽度由 SZ 决定），`stw` = 32位，`stb` = 8位。
+加载/存储宽度由操作码决定：`ld`/`st` = 64位，`ldu`/`lds` = 32位（符号/零扩展），`stw` = 32位，`stb` = 8位。
 
 | OP | 助记符 | 操作数 | 语义 |
 |----|--------|--------|------|
 | 0x40 | `ld` | Rd, [Rs1 + off] | R[Rd] ← zext(Mem[Rs1+off, 64]) |
-| 0x41 | `ldu` | Rd, [Rs1 + off] | R[Rd] ← zext(Mem[Rs1+off, SZ])（SZ=10/01/00） |
-| 0x42 | `lds` | Rd, [Rs1 + off] | R[Rd] ← sext(Mem[Rs1+off, SZ])（SZ≠11） |
+| 0x41 | `ldu` | Rd, [Rs1 + off] | R[Rd] ← zext(Mem[Rs1+off, 32]) |
+| 0x42 | `lds` | Rd, [Rs1 + off] | R[Rd] ← sext(Mem[Rs1+off, 32]) |
 | 0x43 | `st` | Rs1, [Rs2 + off] | Mem[Rs2+off, 64] ← R[Rs1] |
 | 0x44 | `stw` | Rs1, [Rs2 + off] | Mem[Rs2+off, 32] ← R[Rs1]（低32位） |
 | 0x45 | `stb` | Rs1, [Rs2 + off] | Mem[Rs2+off, 8] ← R[Rs1]（低8位） |
 | 0x46 | `lda` | Rd, Rs1, Rs2, scale | R[Rd] ← R[Rs1] + R[Rs2] × scale（scale=1/2/4/8） |
+
+> 注：`lda` 复用 OFF16 字段（字节2-3）编码 Rs2 和 scale：字节2-3 = (Rs2 << 2) | scale_bits，其中 scale_bits = 0/1/2/3 对应 scale 1/2/4/8。
 | 0x50 | `ldr` | Rd, [Rs1 + Rn*scale + off] | R[Rd] ← Mem[Rs1 + Rn×scale + off, 64]（6字节） |
 | 0x51 | `str` | Rs1, [Rs2 + Rn*scale + off] | Mem[Rs2 + Rn×scale + off, 64] ← R[Rs1]（6字节） |
 | 0x52-0x5F | *保留* | — | — |
