@@ -136,7 +136,7 @@ def tokenize(source: str) -> List[Token]:
                 continue
 
         # Split into parts
-        parts = re.findall(r'[\[\],+\-]|\w+\.?\w*|0x[0-9a-fA-F]+|\d+', line)
+        parts = re.findall(r'[\[\],+\-*]|\w+(?:\.\w+)*|0x[0-9a-fA-F]+|\d+', line)
         for part in parts:
             if part == ',':
                 tokens.append(Token('comma', ',', line_no))
@@ -148,6 +148,8 @@ def tokenize(source: str) -> List[Token]:
                 tokens.append(Token('mem', '+', line_no))
             elif part == '-':
                 tokens.append(Token('mem', '-', line_no))
+            elif part == '*':
+                tokens.append(Token('mem', '*', line_no))
             elif re.match(r'^[rR]\d+$', part):
                 tokens.append(Token('reg', part.lower(), line_no))
             elif re.match(r'^[vV]\d+$', part):
@@ -665,7 +667,10 @@ class Assembler:
             self.output.append(((vs1 & 0xF) << 4) | (vs2 & 0xF))
             self.output.append(funct)
             self.output.append(0)  # aux
-            self.output.extend(pack_u16(vs3 & 0xF))  # extension = Vs3
+            # byte4-5: Vs3 (re-purposed from EXT field)
+            self.output.extend(pack_u16(vs3 & 0xF))
+            # byte6-7: padding (vfmadd is 8 bytes)
+            self.output.extend(b'\x00\x00')
             self.offset += 8
             return
         else:
